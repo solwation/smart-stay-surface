@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """
-smart-stay: Keep screen awake while on AC power and a face is visible.
+smart-stay: Keep screen awake while on AC power and presence is detected.
 
-Uses the front-facing camera (via libcamera) and dlib face detection.
-Inhibits GNOME idle/screensaver via DBus when a face is detected.
+Uses the front-facing camera (via libcamera) with two detection modes:
+  - Face detection (default): dlib HOG with histogram equalization
+  - Motion detection (--motion): frame-to-frame difference, works with any angle
+
+Inhibits GNOME idle/screensaver via DBus when presence is detected.
 Only runs checks while on external power (AC adapter).
 
 Usage:
-    smart-stay              # run in foreground
+    smart-stay              # run in foreground (face mode)
+    smart-stay --motion     # run in foreground (motion mode)
     smart-stay --daemon     # run as background daemon
     smart-stay --stop       # stop running daemon
     smart-stay --status     # check if running
@@ -33,6 +37,7 @@ CAMERA_INDEX = 1           # front camera
 CAPTURE_WIDTH = 1280       # IPU3 ImgU needs >= 1280x720 to produce non-black frames
 CAPTURE_HEIGHT = 720
 WARMUP_FRAMES = 20         # discard initial frames while IPU3 auto-exposure converges
+MOTION_THRESHOLD = 5.0     # mean pixel difference to count as motion (0-255 scale)
 
 
 def is_on_ac_power():
@@ -140,6 +145,18 @@ def equalize_histogram(gray):
     return lut[gray]
 
 
+def detect_motion(gray, prev_frame):
+    """Compare current frame to previous frame. Returns (has_motion, diff_value)."""
+    if prev_frame is None:
+        return True, 0.0  # first frame — assume someone is there
+    # Downscale both to 320x240 for fast comparison and noise reduction
+    cur = Image.fromarray(gray, mode="L").resize((320, 240), Image.BILINEAR)
+    prev = Image.fromarray(prev_frame, mode="L").resize((320, 240), Image.BILINEAR)
+    diff = np.abs(np.array(cur, dtype=np.float32) - np.array(prev, dtype=np.float32))
+    mean_diff = diff.mean()
+    return mean_diff > MOTION_THRESHOLD, mean_diff
+
+
 def check_for_face():
     """Capture a frame from the front camera and check for faces."""
     gray = capture_frame()
@@ -183,9 +200,11 @@ def log(msg):
     print(f"[smart-stay] {msg}", flush=True)
 
 
-def run_loop():
+def run_loop(use_motion=False):
     inhibitor = IdleInhibitor()
     grace_remaining = 0
+    prev_frame = None
+    mode_name = "motion" if use_motion else "face"
 
     def cleanup(signum=None, frame=None):
         inhibitor.uninhibit()
@@ -204,7 +223,7 @@ def run_loop():
     with open(PIDFILE, "w") as f:
         f.write(str(os.getpid()))
 
-    log(f"Started (pid {os.getpid()}), checking every {CHECK_INTERVAL}s")
+    log(f"Started (pid {os.getpid()}), mode={mode_name}, checking every {CHECK_INTERVAL}s")
 
     while True:
         try:
@@ -213,29 +232,46 @@ def run_loop():
                     log("Switched to battery — releasing inhibitor")
                     inhibitor.uninhibit()
                     grace_remaining = 0
+                    prev_frame = None
                 else:
                     log("On battery — skipping check")
                 time.sleep(CHECK_INTERVAL)
                 continue
 
-            face_visible = check_for_face()
-
-            if face_visible:
-                grace_remaining = GRACE_CHECKS
-                if not inhibitor.active:
-                    log("Face detected — inhibiting idle")
+            gray = capture_frame()
+            if use_motion:
+                if gray is not None:
+                    present, diff = detect_motion(gray, prev_frame)
+                    prev_frame = gray
                 else:
-                    log("Face detected — inhibitor still active")
+                    present, diff = False, 0.0
+            else:
+                present = gray is not None and len(detect_faces(gray)) > 0
+
+            if present:
+                grace_remaining = GRACE_CHECKS
+                if use_motion:
+                    detail = f"diff={diff:.1f}" if diff > 0 else "first frame"
+                    log_msg = f"Motion detected ({detail}) — "
+                else:
+                    log_msg = "Face detected — "
+                if not inhibitor.active:
+                    log(log_msg + "inhibiting idle")
+                else:
+                    log(log_msg + "inhibitor still active")
                 inhibitor.inhibit()
             else:
                 if grace_remaining > 0:
                     grace_remaining -= 1
-                    log(f"No face — grace period ({grace_remaining} checks remaining)")
+                    if use_motion:
+                        log(f"No motion (diff={diff:.1f}) — grace ({grace_remaining} remaining)")
+                    else:
+                        log(f"No face — grace period ({grace_remaining} checks remaining)")
                 else:
                     if inhibitor.active:
-                        log("No face detected — releasing inhibitor")
+                        log(f"No {mode_name} detected — releasing inhibitor")
                     else:
-                        log("No face detected — idle allowed")
+                        log(f"No {mode_name} detected — idle allowed")
                     inhibitor.uninhibit()
 
         except Exception as e:
@@ -245,15 +281,17 @@ def run_loop():
         time.sleep(CHECK_INTERVAL)
 
 
-def debug_capture():
-    """Capture frames every 5s for 30s, saving images with face detection results."""
+def debug_capture(use_motion=False):
+    """Capture frames every 5s for 30s, saving images with detection results."""
     from PIL import ImageDraw
     out_dir = "/tmp/smart-stay-debug"
     os.makedirs(out_dir, exist_ok=True)
 
-    print(f"Debug capture: 7 frames over 30s, saving to {out_dir}/")
+    mode_name = "motion" if use_motion else "face"
+    print(f"Debug capture ({mode_name} mode): 7 frames over 30s, saving to {out_dir}/")
     print("Look at the camera, then move away partway through.\n")
 
+    prev_frame = None
     for i in range(7):
         ts = time.strftime("%H:%M:%S")
         gray = capture_frame()
@@ -262,10 +300,13 @@ def debug_capture():
             time.sleep(5)
             continue
 
-        faces = detect_faces(gray)
-        # Save raw grayscale
+        # Detection
+        faces = detect_faces(gray) if not use_motion else []
+        has_motion, diff = detect_motion(gray, prev_frame)
+        prev_frame = gray
+
+        # Save image
         img = Image.fromarray(gray, mode="L")
-        # Draw face rectangles
         if faces:
             img = img.convert("RGB")
             draw = ImageDraw.Draw(img)
@@ -277,13 +318,22 @@ def debug_capture():
 
         path = os.path.join(out_dir, f"frame_{i:02d}.png")
         img.save(path)
-        status = f"{len(faces)} face(s)" if faces else "no face"
-        print(f"  [{ts}] Frame {i}: {status} — saved {path}")
+
+        parts = []
+        if not use_motion:
+            parts.append(f"{len(faces)} face(s)" if faces else "no face")
+        motion_str = f"motion={diff:.1f}" if diff > 0 else "first"
+        if has_motion:
+            parts.append(f"MOTION ({motion_str})")
+        else:
+            parts.append(f"still ({motion_str})")
+        print(f"  [{ts}] Frame {i}: {', '.join(parts)} — saved {path}")
 
         if i < 6:
             time.sleep(5)
 
     print(f"\nDone. Check images in {out_dir}/")
+    print(f"Motion threshold: {MOTION_THRESHOLD} (current setting)")
 
 
 def get_running_pid():
@@ -301,6 +351,8 @@ def main():
     parser.add_argument("--daemon", action="store_true", help="Run in background")
     parser.add_argument("--stop", action="store_true", help="Stop running daemon")
     parser.add_argument("--status", action="store_true", help="Check if running")
+    parser.add_argument("--motion", action="store_true",
+                        help="Use motion detection instead of face detection (better for profile/side angles)")
     parser.add_argument("--debug-capture", action="store_true",
                         help="Capture frames every 5s for 30s, save to /tmp/smart-stay-debug/")
     args = parser.parse_args()
@@ -323,7 +375,7 @@ def main():
         return
 
     if args.debug_capture:
-        debug_capture()
+        debug_capture(use_motion=args.motion)
         return
 
     existing = get_running_pid()
@@ -344,7 +396,7 @@ def main():
         os.dup2(log_fd.fileno(), sys.stdout.fileno())
         os.dup2(log_fd.fileno(), sys.stderr.fileno())
 
-    run_loop()
+    run_loop(use_motion=args.motion)
 
 
 if __name__ == "__main__":

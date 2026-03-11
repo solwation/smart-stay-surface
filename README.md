@@ -8,8 +8,10 @@ Every 30 seconds (configurable), the script:
 
 1. Checks if the device is on AC power — does nothing on battery
 2. Captures a 1280x720 frame from the front camera via `libcamera`
-3. Applies histogram equalization and runs face detection using `dlib`
-4. If a face is found, inhibits GNOME idle/screensaver via DBus
+3. Detects presence using either:
+   - **Face mode** (default): histogram equalization + dlib HOG detection
+   - **Motion mode** (`--motion`): frame-to-frame pixel difference — works at any angle
+4. If presence is detected, inhibits GNOME idle/screensaver via DBus
 5. Includes a grace period (2 checks / ~1 min) after the face disappears, so brief glances away don't trigger a lock
 
 ## Hardware
@@ -76,11 +78,14 @@ sudo reboot
 
 ### Manual
 ```bash
-smart-stay                 # run in foreground (see logs live)
-smart-stay --daemon        # run in background
-smart-stay --stop          # stop background daemon
-smart-stay --status        # check if running
-smart-stay --debug-capture # capture 7 test frames to /tmp/smart-stay-debug/
+smart-stay                          # run in foreground (face detection)
+smart-stay --motion                 # run in foreground (motion detection)
+smart-stay --daemon                 # run as background daemon
+smart-stay --motion --daemon        # motion mode as daemon
+smart-stay --stop                   # stop background daemon
+smart-stay --status                 # check if running
+smart-stay --debug-capture          # test frames with face detection
+smart-stay --motion --debug-capture # test frames with motion detection
 ```
 
 ### Systemd (auto-start on login)
@@ -88,6 +93,8 @@ smart-stay --debug-capture # capture 7 test frames to /tmp/smart-stay-debug/
 systemctl --user enable smart-stay
 systemctl --user start smart-stay
 ```
+
+To use motion mode with systemd, edit the service file (`~/.config/systemd/user/smart-stay.service`) and add `--motion` to the `ExecStart` line.
 
 ### Logs
 ```bash
@@ -107,6 +114,7 @@ Edit the constants at the top of `smart-stay`:
 | `CAMERA_INDEX` | `1` | libcamera camera index (front camera) |
 | `CAPTURE_WIDTH` | `1280` | Capture resolution width (IPU3 needs >= 1280x720) |
 | `CAPTURE_HEIGHT` | `720` | Capture resolution height |
+| `MOTION_THRESHOLD` | `5.0` | Mean pixel diff to count as motion (0-255 scale) |
 
 ## Limitations
 

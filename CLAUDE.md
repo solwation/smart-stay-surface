@@ -8,7 +8,9 @@ Single-file Python script (`smart-stay`) — no build system, no package manager
 
 **Camera capture**: Uses `libcamera` Python bindings (not OpenCV) because Surface IPU3 cameras don't support standard V4L2 capture. Must capture at 1280x720 minimum — the IPU3 ImgU produces all-black frames at lower resolutions (e.g. 320x240, 640x480). Captures NV12 frames via continuous streaming (multiple buffers pre-queued) with ~20 warmup frames to let the IPU3 auto-exposure converge. Must mmap the full `frame_size` (Y+UV planes together), not just `plane[0].length` — IPU3 DMA coherency requires the complete NV12 frame to be mapped or the Y plane reads as zeros. Extracts the Y plane as grayscale for face detection. Camera acquire has retry logic (3 attempts with 1s delay) because IPU3 needs time between release/acquire cycles.
 
-**Face detection**: `dlib.get_frontal_face_detector()` (HOG-based) with upsample=1 for better detection at distance. Runs on full 1280x720 grayscale with histogram equalization applied first (numpy LUT-based) to handle backlighting and low-light conditions. Fast enough for a 30s polling loop.
+**Face detection** (default mode): `dlib.get_frontal_face_detector()` (HOG-based) with upsample=1 for better detection at distance. Runs on full 1280x720 grayscale with histogram equalization applied first (numpy LUT-based) to handle backlighting and low-light conditions. Fast enough for a 30s polling loop.
+
+**Motion detection** (`--motion` mode): Compares consecutive frames by downscaling to 320x240 and computing mean absolute pixel difference. Threshold of 5.0 (configurable via `MOTION_THRESHOLD`). Better than face detection when the camera sees a profile/side angle. At 30s intervals, even subtle movements (typing, shifting) register well above threshold.
 
 **Idle inhibit**: GNOME SessionManager DBus (`org.gnome.SessionManager.Inhibit` with flag 8). Acquire/release pattern with a cookie.
 
