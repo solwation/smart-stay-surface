@@ -19,7 +19,7 @@ Single-file Python script (`smart-stay`) — no build system, no package manager
 ## Key files
 - `smart-stay` — the main script, installed to `~/bin/`
 - `smart-stay.service` — systemd user service, installed to `~/.config/systemd/user/`
-- `install.sh` — copies both files to the right places
+- `install.sh` — copies both files to the right places. Accepts `--motion` to install with motion detection mode.
 
 ## Hardware specifics
 - Front camera: libcamera index 1 (`\_SB_.PCI0.I2C2.CAMF`)

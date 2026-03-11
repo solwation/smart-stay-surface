@@ -43,8 +43,9 @@ sudo apt install python3-libcamera python3-dlib python3-numpy python3-dbus pytho
 ```bash
 git clone https://github.com/solwation/smart-stay-surface.git
 cd smart-stay-surface
-./install.sh     # requires sudo for camera tuning fix
-sudo reboot      # required to reset camera sensors
+./install.sh              # face detection (default)
+./install.sh --motion     # or: motion detection (better for side angles)
+sudo reboot               # required to reset camera sensors
 ```
 
 After reboot:
@@ -94,7 +95,7 @@ systemctl --user enable smart-stay
 systemctl --user start smart-stay
 ```
 
-To use motion mode with systemd, edit the service file (`~/.config/systemd/user/smart-stay.service`) and add `--motion` to the `ExecStart` line.
+To use motion mode with systemd, either install with `./install.sh --motion` or edit the service file (`~/.config/systemd/user/smart-stay.service`) and add `--motion` to the `ExecStart` line.
 
 ### Logs
 ```bash
