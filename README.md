@@ -7,8 +7,8 @@ Keep your screen awake while on AC power and your face is visible to the front c
 Every 30 seconds (configurable), the script:
 
 1. Checks if the device is on AC power — does nothing on battery
-2. Captures a frame from the front camera via `libcamera`
-3. Runs face detection using `dlib`
+2. Captures a 1280x720 frame from the front camera via `libcamera`
+3. Applies histogram equalization and runs face detection using `dlib`
 4. If a face is found, inhibits GNOME idle/screensaver via DBus
 5. Includes a grace period (2 checks / ~1 min) after the face disappears, so brief glances away don't trigger a lock
 
@@ -105,11 +105,12 @@ Edit the constants at the top of `smart-stay`:
 | `GRACE_CHECKS` | `2` | Extra checks to keep screen on after face disappears |
 | `AC_POWER_PATH` | `/sys/class/power_supply/ADP1/online` | Sysfs path for AC adapter |
 | `CAMERA_INDEX` | `1` | libcamera camera index (front camera) |
-| `CAPTURE_WIDTH` | `320` | Capture resolution width |
-| `CAPTURE_HEIGHT` | `240` | Capture resolution height |
+| `CAPTURE_WIDTH` | `1280` | Capture resolution width (IPU3 needs >= 1280x720) |
+| `CAPTURE_HEIGHT` | `720` | Capture resolution height |
 
 ## Limitations
 
 - **Surface / IPU3 only** — uses `libcamera` for camera access, which is needed for IPU3 cameras. Standard laptops with UVC cameras would need a different (simpler) capture approach using OpenCV directly.
 - **GNOME only** — uses GNOME SessionManager DBus for idle inhibit. Other desktop environments would need a different inhibit mechanism.
-- **Privacy** — frames are captured, processed in memory, and immediately discarded. Nothing is saved to disk.
+- **Minimum resolution** — the IPU3 ImgU requires >= 1280x720 capture resolution. Lower resolutions produce black frames.
+- **Privacy** — frames are captured, processed in memory, and immediately discarded. Nothing is saved to disk (except in `--debug-capture` mode).

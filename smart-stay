@@ -23,14 +23,15 @@ import os
 import signal
 import sys
 import time
+from PIL import Image
 
 PIDFILE = os.path.expanduser("~/.cache/smart-stay.pid")
 CHECK_INTERVAL = 30        # seconds between face checks
 GRACE_CHECKS = 2           # keep inhibiting for N checks after face disappears
 AC_POWER_PATH = "/sys/class/power_supply/ADP1/online"
 CAMERA_INDEX = 1           # front camera
-CAPTURE_WIDTH = 320
-CAPTURE_HEIGHT = 240
+CAPTURE_WIDTH = 1280       # IPU3 ImgU needs >= 1280x720 to produce non-black frames
+CAPTURE_HEIGHT = 720
 WARMUP_FRAMES = 20         # discard initial frames while IPU3 auto-exposure converges
 
 
@@ -43,13 +44,25 @@ def is_on_ac_power():
 
 
 def capture_frame():
-    """Capture a grayscale frame from the front camera. Returns numpy array or None."""
+    """Capture a grayscale frame from the front camera. Returns numpy array or None.
+
+    Captures at 1280x720 — the IPU3 ImgU produces black frames at lower resolutions.
+    Retries camera acquisition up to 3 times (IPU3 needs time between release/acquire).
+    """
     cm = libcamera.CameraManager.singleton()
     if CAMERA_INDEX >= len(cm.cameras):
         return None
 
     cam = cm.cameras[CAMERA_INDEX]
-    cam.acquire()
+    # IPU3 needs a moment between release/acquire cycles
+    for attempt in range(3):
+        try:
+            cam.acquire()
+            break
+        except RuntimeError:
+            if attempt == 2:
+                return None
+            time.sleep(1.0)
     try:
         config = cam.generate_configuration([libcamera.StreamRole.Viewfinder])
         sc = config.at(0)
@@ -105,9 +118,26 @@ def capture_frame():
 
 
 def detect_faces(gray):
-    """Run dlib face detection on a grayscale frame. Returns list of face rects."""
+    """Run dlib face detection on a grayscale frame. Returns list of face rects.
+
+    Applies histogram equalization first to handle uneven lighting/backlighting,
+    and uses upsample=1 for better detection of smaller or distant faces.
+    """
+    # Equalize contrast — helps with backlighting and low-light conditions
+    equalized = equalize_histogram(gray)
     detector = dlib.get_frontal_face_detector()
-    return detector(gray, 0)
+    return detector(equalized, 1)
+
+
+def equalize_histogram(gray):
+    """CLAHE-style histogram equalization using numpy (no OpenCV dependency)."""
+    hist, _ = np.histogram(gray.flatten(), bins=256, range=(0, 256))
+    cdf = hist.cumsum()
+    # Mask zero bins
+    cdf_min = cdf[cdf > 0].min()
+    total = gray.size
+    lut = ((cdf - cdf_min) * 255 / (total - cdf_min)).clip(0, 255).astype(np.uint8)
+    return lut[gray]
 
 
 def check_for_face():
@@ -217,7 +247,7 @@ def run_loop():
 
 def debug_capture():
     """Capture frames every 5s for 30s, saving images with face detection results."""
-    from PIL import Image, ImageDraw
+    from PIL import ImageDraw
     out_dir = "/tmp/smart-stay-debug"
     os.makedirs(out_dir, exist_ok=True)
 

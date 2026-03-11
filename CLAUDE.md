@@ -6,9 +6,9 @@ A "Smart Stay" daemon for Linux Surface devices. Keeps the screen awake while on
 ## Architecture
 Single-file Python script (`smart-stay`) — no build system, no package manager, no virtualenv. System Python packages only.
 
-**Camera capture**: Uses `libcamera` Python bindings (not OpenCV) because Surface IPU3 cameras don't support standard V4L2 capture. Captures NV12 frames via continuous streaming (multiple buffers pre-queued) with ~20 warmup frames to let the IPU3 auto-exposure converge. Must mmap the full `frame_size` (Y+UV planes together), not just `plane[0].length` — IPU3 DMA coherency requires the complete NV12 frame to be mapped or the Y plane reads as zeros. Extracts the Y plane as grayscale for face detection.
+**Camera capture**: Uses `libcamera` Python bindings (not OpenCV) because Surface IPU3 cameras don't support standard V4L2 capture. Must capture at 1280x720 minimum — the IPU3 ImgU produces all-black frames at lower resolutions (e.g. 320x240, 640x480). Captures NV12 frames via continuous streaming (multiple buffers pre-queued) with ~20 warmup frames to let the IPU3 auto-exposure converge. Must mmap the full `frame_size` (Y+UV planes together), not just `plane[0].length` — IPU3 DMA coherency requires the complete NV12 frame to be mapped or the Y plane reads as zeros. Extracts the Y plane as grayscale for face detection. Camera acquire has retry logic (3 attempts with 1s delay) because IPU3 needs time between release/acquire cycles.
 
-**Face detection**: `dlib.get_frontal_face_detector()` (HOG-based). Runs on 320x240 grayscale — fast enough for a 30s polling loop.
+**Face detection**: `dlib.get_frontal_face_detector()` (HOG-based) with upsample=1 for better detection at distance. Runs on full 1280x720 grayscale with histogram equalization applied first (numpy LUT-based) to handle backlighting and low-light conditions. Fast enough for a 30s polling loop.
 
 **Idle inhibit**: GNOME SessionManager DBus (`org.gnome.SessionManager.Inhibit` with flag 8). Acquire/release pattern with a cookie.
 
@@ -23,7 +23,7 @@ Single-file Python script (`smart-stay`) — no build system, no package manager
 - Front camera: libcamera index 1 (`\_SB_.PCI0.I2C2.CAMF`)
 - Back camera: libcamera index 0 (`\_SB_.PCI0.I2C3.CAMR`)
 - AC power: `/sys/class/power_supply/ADP1/online`
-- Pixel format: NV12 (default from IPU3 pipeline), frame_size=115200 at 320x240 (76800 Y + 38400 UV)
+- Pixel format: NV12 (default from IPU3 pipeline), frame_size=1382400 at 1280x720 (921600 Y + 460800 UV). IPU3 ImgU requires >= 1280x720 — smaller resolutions produce all-black frames.
 - Tuning files: `/usr/share/libcamera/ipa/ipu3/ov5693.yaml` (front) and `ov8865.yaml` (back) — must have proper IPA algorithm config (Agc, Awb, BlackLevelCorrection, ToneMapping) or frames will be black. See `~/fix-camera.sh`.
 
 ## Conventions
