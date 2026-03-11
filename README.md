@@ -33,27 +33,54 @@ python3-dbus         # GNOME session DBus (apt)
 
 Install with:
 ```bash
-sudo apt install python3-libcamera python3-dlib python3-numpy python3-dbus
+sudo apt install python3-libcamera python3-dlib python3-numpy python3-dbus python3-pil
 ```
 
 ## Install
 
 ```bash
-git clone git@github.com:solwation/smart-stay-surface.git
+git clone https://github.com/solwation/smart-stay-surface.git
 cd smart-stay-surface
-./install.sh
+./install.sh     # requires sudo for camera tuning fix
+sudo reboot      # required to reset camera sensors
 ```
 
-This copies `smart-stay` to `~/bin/` and the systemd service to `~/.config/systemd/user/`.
+After reboot:
+```bash
+systemctl --user enable smart-stay
+systemctl --user start smart-stay
+```
+
+The installer:
+1. Fixes the IPU3 camera tuning files (see [Camera Fix](#camera-fix) below)
+2. Copies `smart-stay` to `~/bin/`
+3. Installs the systemd user service to `~/.config/systemd/user/`
+
+### Camera Fix
+
+Surface IPU3 cameras require proper libcamera IPA tuning files to function. The default files shipped with `python3-libcamera` are often symlinks to `uncalibrated.yaml`, which lacks the required algorithm configuration. Without this fix, **the cameras produce completely black frames**.
+
+`fix-camera.sh` (run automatically by `install.sh`) writes minimal working tuning files for both sensors:
+- `/usr/share/libcamera/ipa/ipu3/ov5693.yaml` (front camera)
+- `/usr/share/libcamera/ipa/ipu3/ov8865.yaml` (back camera)
+
+These enable the essential IPA algorithms: auto-gain (Agc), auto-white-balance (Awb), black level correction, and tone mapping. A reboot is required after the fix to power-cycle the camera sensors.
+
+You can run `fix-camera.sh` independently if needed:
+```bash
+./fix-camera.sh
+sudo reboot
+```
 
 ## Usage
 
 ### Manual
 ```bash
-smart-stay              # run in foreground (see logs live)
-smart-stay --daemon     # run in background
-smart-stay --stop       # stop background daemon
-smart-stay --status     # check if running
+smart-stay                 # run in foreground (see logs live)
+smart-stay --daemon        # run in background
+smart-stay --stop          # stop background daemon
+smart-stay --status        # check if running
+smart-stay --debug-capture # capture 7 test frames to /tmp/smart-stay-debug/
 ```
 
 ### Systemd (auto-start on login)
