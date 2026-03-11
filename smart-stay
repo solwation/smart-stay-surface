@@ -31,6 +31,7 @@ AC_POWER_PATH = "/sys/class/power_supply/ADP1/online"
 CAMERA_INDEX = 1           # front camera
 CAPTURE_WIDTH = 320
 CAPTURE_HEIGHT = 240
+WARMUP_FRAMES = 20         # discard initial frames while IPU3 auto-exposure converges
 
 
 def is_on_ac_power():
@@ -41,11 +42,11 @@ def is_on_ac_power():
         return False
 
 
-def check_for_face():
-    """Capture a frame from the front camera and check for faces."""
+def capture_frame():
+    """Capture a grayscale frame from the front camera. Returns numpy array or None."""
     cm = libcamera.CameraManager.singleton()
     if CAMERA_INDEX >= len(cm.cameras):
-        return False
+        return None
 
     cam = cm.cameras[CAMERA_INDEX]
     cam.acquire()
@@ -57,38 +58,64 @@ def check_for_face():
         cam.configure(config)
 
         w, h = sc.size.width, sc.size.height
+        frame_size = sc.frame_size
         stream = sc.stream
         allocator = libcamera.FrameBufferAllocator(cam)
         allocator.allocate(stream)
         buffers = allocator.buffers(stream)
 
+        # Pre-queue all buffers to keep the pipeline fed
         cam.start()
-        req = cam.create_request()
-        req.add_buffer(stream, buffers[0])
-        cam.queue_request(req)
+        for buf in buffers:
+            req = cam.create_request()
+            req.add_buffer(stream, buf)
+            cam.queue_request(req)
 
-        # Wait for frame (up to 2 seconds)
-        for _ in range(20):
-            if req.status == libcamera.Request.Status.Complete:
+        # Stream for WARMUP_FRAMES to let auto-exposure converge, keep the last
+        gray = None
+        deadline = time.monotonic() + 5.0  # 5s absolute timeout
+        frames_received = 0
+
+        while frames_received < WARMUP_FRAMES + 1:
+            if time.monotonic() > deadline:
                 break
-            time.sleep(0.1)
-
-        face_found = False
-        if req.status == libcamera.Request.Status.Complete:
-            buf = req.buffers[stream]
-            fd = buf.planes[0].fd
-            length = buf.planes[0].length
-            with mmap.mmap(fd, length, mmap.MAP_SHARED, mmap.PROT_READ) as mm:
-                gray = np.frombuffer(mm[:w * h], dtype=np.uint8).reshape(h, w)
-                detector = dlib.get_frontal_face_detector()
-                faces = detector(gray, 0)
-                face_found = len(faces) > 0
+            # Poll for completed requests
+            reqs = cm.get_ready_requests()
+            if not reqs:
+                time.sleep(0.005)
+                continue
+            for req in reqs:
+                if req.status == libcamera.Request.Status.Complete:
+                    buf = req.buffers[stream]
+                    fd = buf.planes[0].fd
+                    # Must mmap full frame (Y+UV) for IPU3 DMA coherency
+                    with mmap.mmap(fd, frame_size, mmap.MAP_SHARED, mmap.PROT_READ) as mm:
+                        gray = np.frombuffer(mm[:w * h], dtype=np.uint8).reshape(h, w).copy()
+                    frames_received += 1
+                    # Re-queue the buffer to keep streaming
+                    req2 = cam.create_request()
+                    req2.add_buffer(stream, buf)
+                    cam.queue_request(req2)
 
         cam.stop()
     finally:
         cam.release()
 
-    return face_found
+    return gray
+
+
+def detect_faces(gray):
+    """Run dlib face detection on a grayscale frame. Returns list of face rects."""
+    detector = dlib.get_frontal_face_detector()
+    return detector(gray, 0)
+
+
+def check_for_face():
+    """Capture a frame from the front camera and check for faces."""
+    gray = capture_frame()
+    if gray is None:
+        return False
+    return len(detect_faces(gray)) > 0
 
 
 class IdleInhibitor:
@@ -156,6 +183,8 @@ def run_loop():
                     log("Switched to battery — releasing inhibitor")
                     inhibitor.uninhibit()
                     grace_remaining = 0
+                else:
+                    log("On battery — skipping check")
                 time.sleep(CHECK_INTERVAL)
                 continue
 
@@ -165,13 +194,18 @@ def run_loop():
                 grace_remaining = GRACE_CHECKS
                 if not inhibitor.active:
                     log("Face detected — inhibiting idle")
+                else:
+                    log("Face detected — inhibitor still active")
                 inhibitor.inhibit()
             else:
                 if grace_remaining > 0:
                     grace_remaining -= 1
+                    log(f"No face — grace period ({grace_remaining} checks remaining)")
                 else:
                     if inhibitor.active:
                         log("No face detected — releasing inhibitor")
+                    else:
+                        log("No face detected — idle allowed")
                     inhibitor.uninhibit()
 
         except Exception as e:
@@ -179,6 +213,47 @@ def run_loop():
             inhibitor.uninhibit()
 
         time.sleep(CHECK_INTERVAL)
+
+
+def debug_capture():
+    """Capture frames every 5s for 30s, saving images with face detection results."""
+    from PIL import Image, ImageDraw
+    out_dir = "/tmp/smart-stay-debug"
+    os.makedirs(out_dir, exist_ok=True)
+
+    print(f"Debug capture: 7 frames over 30s, saving to {out_dir}/")
+    print("Look at the camera, then move away partway through.\n")
+
+    for i in range(7):
+        ts = time.strftime("%H:%M:%S")
+        gray = capture_frame()
+        if gray is None:
+            print(f"  [{ts}] Frame {i}: FAILED to capture")
+            time.sleep(5)
+            continue
+
+        faces = detect_faces(gray)
+        # Save raw grayscale
+        img = Image.fromarray(gray, mode="L")
+        # Draw face rectangles
+        if faces:
+            img = img.convert("RGB")
+            draw = ImageDraw.Draw(img)
+            for face in faces:
+                draw.rectangle(
+                    [face.left(), face.top(), face.right(), face.bottom()],
+                    outline="green", width=2,
+                )
+
+        path = os.path.join(out_dir, f"frame_{i:02d}.png")
+        img.save(path)
+        status = f"{len(faces)} face(s)" if faces else "no face"
+        print(f"  [{ts}] Frame {i}: {status} — saved {path}")
+
+        if i < 6:
+            time.sleep(5)
+
+    print(f"\nDone. Check images in {out_dir}/")
 
 
 def get_running_pid():
@@ -196,6 +271,8 @@ def main():
     parser.add_argument("--daemon", action="store_true", help="Run in background")
     parser.add_argument("--stop", action="store_true", help="Stop running daemon")
     parser.add_argument("--status", action="store_true", help="Check if running")
+    parser.add_argument("--debug-capture", action="store_true",
+                        help="Capture frames every 5s for 30s, save to /tmp/smart-stay-debug/")
     args = parser.parse_args()
 
     if args.stop:
@@ -213,6 +290,10 @@ def main():
             print(f"smart-stay is running (pid {pid})")
         else:
             print("smart-stay is not running")
+        return
+
+    if args.debug_capture:
+        debug_capture()
         return
 
     existing = get_running_pid()
