@@ -6,13 +6,16 @@ Keep your screen awake while on AC power and your face is visible to the front c
 
 Every 30 seconds (configurable), the script:
 
-1. Checks if the device is on AC power — does nothing on battery
+1. Checks power state (AC or battery) and selects the configured detection mode
 2. Captures a 1280x720 frame from the front camera via `libcamera`
-3. Detects presence using either:
-   - **Face mode** (default): histogram equalization + dlib HOG detection
-   - **Motion mode** (`--motion`): frame-to-frame pixel difference — works at any angle
+3. Detects presence using the active mode:
+   - **Face mode**: histogram equalization + dlib HOG detection (frontal faces)
+   - **Motion mode**: frame-to-frame pixel difference — works at any angle
+   - **Off**: skips detection entirely (e.g. to save battery)
 4. If presence is detected, inhibits GNOME idle/screensaver via DBus
-5. Includes a grace period (2 checks / ~1 min) after the face disappears, so brief glances away don't trigger a lock
+5. Includes a grace period (2 checks / ~1 min) after presence is lost, so brief glances away don't trigger a lock
+
+By default, motion detection runs on AC and face detection on battery. This is configurable via `--ac-mode` and `--battery-mode`.
 
 ## Hardware
 
@@ -43,9 +46,10 @@ sudo apt install python3-libcamera python3-dlib python3-numpy python3-dbus pytho
 ```bash
 git clone https://github.com/solwation/smart-stay-surface.git
 cd smart-stay-surface
-./install.sh              # face detection (default)
-./install.sh --motion     # or: motion detection (better for side angles)
-sudo reboot               # required to reset camera sensors
+./install.sh                                    # default (AC=motion, battery=face)
+./install.sh --ac-mode face --battery-mode off  # face on AC only, skip on battery
+./install.sh --motion                           # legacy: motion on AC, skip on battery
+sudo reboot                                     # required to reset camera sensors
 ```
 
 After reboot:
@@ -79,14 +83,13 @@ sudo reboot
 
 ### Manual
 ```bash
-smart-stay                          # run in foreground (face detection)
-smart-stay --motion                 # run in foreground (motion detection)
-smart-stay --daemon                 # run as background daemon
-smart-stay --motion --daemon        # motion mode as daemon
-smart-stay --stop                   # stop background daemon
-smart-stay --status                 # check if running
-smart-stay --debug-capture          # test frames with face detection
-smart-stay --motion --debug-capture # test frames with motion detection
+smart-stay                                    # default (AC=motion, battery=face)
+smart-stay --ac-mode face --battery-mode off  # face on AC only, skip on battery
+smart-stay --motion                           # legacy: motion on AC, skip on battery
+smart-stay --daemon                           # run as background daemon
+smart-stay --stop                             # stop background daemon
+smart-stay --status                           # check if running
+smart-stay --debug-capture                    # test frames with detection overlay
 ```
 
 ### Systemd (auto-start on login)
@@ -95,7 +98,7 @@ systemctl --user enable smart-stay
 systemctl --user start smart-stay
 ```
 
-To use motion mode with systemd, either install with `./install.sh --motion` or edit the service file (`~/.config/systemd/user/smart-stay.service`) and add `--motion` to the `ExecStart` line.
+The installer configures the systemd service with the mode flags you pass. To change modes later, re-run `./install.sh` with different flags, or edit `~/.config/systemd/user/smart-stay.service` and add `--ac-mode`/`--battery-mode` to the `ExecStart` line.
 
 ### Logs
 ```bash
@@ -123,3 +126,7 @@ Edit the constants at the top of `smart-stay`:
 - **GNOME only** — uses GNOME SessionManager DBus for idle inhibit. Other desktop environments would need a different inhibit mechanism.
 - **Minimum resolution** — the IPU3 ImgU requires >= 1280x720 capture resolution. Lower resolutions produce black frames.
 - **Privacy** — frames are captured, processed in memory, and immediately discarded. Nothing is saved to disk (except in `--debug-capture` mode).
+
+## License
+
+[MIT](LICENSE) — Olof Wingren
