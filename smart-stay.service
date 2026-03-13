@@ -1,5 +1,5 @@
 [Unit]
-Description=Smart Stay - keep screen on while face is visible
+Description=Smart Stay - keep screen on while presence detected (motion on AC, face on battery)
 After=graphical-session.target
 
 [Service]

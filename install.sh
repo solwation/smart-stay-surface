@@ -6,9 +6,9 @@ EXTRA_ARGS=""
 
 if [[ "${1:-}" == "--motion" ]]; then
     EXTRA_ARGS=" --motion"
-    echo "Installing smart-stay (motion mode)..."
+    echo "Installing smart-stay (motion-only mode)..."
 else
-    echo "Installing smart-stay (face mode)..."
+    echo "Installing smart-stay (adaptive: motion on AC, face on battery)..."
 fi
 
 # Fix IPU3 camera tuning files (requires sudo)

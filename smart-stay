@@ -204,7 +204,6 @@ def run_loop(use_motion=False):
     inhibitor = IdleInhibitor()
     grace_remaining = 0
     prev_frame = None
-    mode_name = "motion" if use_motion else "face"
 
     def cleanup(signum=None, frame=None):
         inhibitor.uninhibit()
@@ -223,11 +222,17 @@ def run_loop(use_motion=False):
     with open(PIDFILE, "w") as f:
         f.write(str(os.getpid()))
 
-    log(f"Started (pid {os.getpid()}), mode={mode_name}, checking every {CHECK_INTERVAL}s")
+    if use_motion:
+        log(f"Started (pid {os.getpid()}), mode=motion, checking every {CHECK_INTERVAL}s")
+    else:
+        log(f"Started (pid {os.getpid()}), mode=adaptive (AC=motion, battery=face), checking every {CHECK_INTERVAL}s")
 
     while True:
         try:
-            if not is_on_ac_power():
+            on_ac = is_on_ac_power()
+            # Adaptive mode: motion on AC, face on battery
+            # --motion flag: always motion (original behavior, skips on battery)
+            if use_motion and not on_ac:
                 if inhibitor.active:
                     log("Switched to battery — releasing inhibitor")
                     inhibitor.uninhibit()
@@ -238,8 +243,11 @@ def run_loop(use_motion=False):
                 time.sleep(CHECK_INTERVAL)
                 continue
 
+            use_motion_now = on_ac if not use_motion else True
+            mode_name = "motion" if use_motion_now else "face"
+
             gray = capture_frame()
-            if use_motion:
+            if use_motion_now:
                 if gray is not None:
                     present, diff = detect_motion(gray, prev_frame)
                     prev_frame = gray
@@ -247,10 +255,12 @@ def run_loop(use_motion=False):
                     present, diff = False, 0.0
             else:
                 present = gray is not None and len(detect_faces(gray)) > 0
+                # Reset prev_frame when switching from motion to face
+                prev_frame = None
 
             if present:
                 grace_remaining = GRACE_CHECKS
-                if use_motion:
+                if use_motion_now:
                     detail = f"diff={diff:.1f}" if diff > 0 else "first frame"
                     log_msg = f"Motion detected ({detail}) — "
                 else:
@@ -263,7 +273,7 @@ def run_loop(use_motion=False):
             else:
                 if grace_remaining > 0:
                     grace_remaining -= 1
-                    if use_motion:
+                    if use_motion_now:
                         log(f"No motion (diff={diff:.1f}) — grace ({grace_remaining} remaining)")
                     else:
                         log(f"No face — grace period ({grace_remaining} checks remaining)")
