@@ -1,20 +1,25 @@
 #!/usr/bin/env python3
 """
-smart-stay: Keep screen awake while on AC power and presence is detected.
+smart-stay: Keep screen awake while presence is detected.
 
-Uses the front-facing camera (via libcamera) with two detection modes:
-  - Face detection (default): dlib HOG with histogram equalization
-  - Motion detection (--motion): frame-to-frame difference, works with any angle
+Uses the front-facing camera (via libcamera) with two detection methods:
+  - face: dlib HOG with histogram equalization (frontal faces only)
+  - motion: frame-to-frame difference (works with any angle)
+
+Detection method is configurable per power state:
+  --ac-mode MODE       detection on AC power (default: motion)
+  --battery-mode MODE  detection on battery (default: face)
+  MODE is one of: face, motion, off
 
 Inhibits GNOME idle/screensaver via DBus when presence is detected.
-Only runs checks while on external power (AC adapter).
 
 Usage:
-    smart-stay              # run in foreground (face mode)
-    smart-stay --motion     # run in foreground (motion mode)
-    smart-stay --daemon     # run as background daemon
-    smart-stay --stop       # stop running daemon
-    smart-stay --status     # check if running
+    smart-stay                                    # default (AC=motion, battery=face)
+    smart-stay --ac-mode face --battery-mode off  # face on AC, skip on battery
+    smart-stay --motion                           # legacy: motion on AC, skip on battery
+    smart-stay --daemon                           # run as background daemon
+    smart-stay --stop                             # stop running daemon
+    smart-stay --status                           # check if running
 """
 
 import argparse
@@ -200,7 +205,7 @@ def log(msg):
     print(f"[smart-stay] {msg}", flush=True)
 
 
-def run_loop(use_motion=False):
+def run_loop(ac_mode="motion", battery_mode="face"):
     inhibitor = IdleInhibitor()
     grace_remaining = 0
     prev_frame = None
@@ -222,32 +227,25 @@ def run_loop(use_motion=False):
     with open(PIDFILE, "w") as f:
         f.write(str(os.getpid()))
 
-    if use_motion:
-        log(f"Started (pid {os.getpid()}), mode=motion, checking every {CHECK_INTERVAL}s")
-    else:
-        log(f"Started (pid {os.getpid()}), mode=adaptive (AC=motion, battery=face), checking every {CHECK_INTERVAL}s")
+    log(f"Started (pid {os.getpid()}), AC={ac_mode}, battery={battery_mode}, checking every {CHECK_INTERVAL}s")
 
     while True:
         try:
             on_ac = is_on_ac_power()
-            # Adaptive mode: motion on AC, face on battery
-            # --motion flag: always motion (original behavior, skips on battery)
-            if use_motion and not on_ac:
+            mode = ac_mode if on_ac else battery_mode
+
+            if mode == "off":
                 if inhibitor.active:
-                    log("Switched to battery — releasing inhibitor")
+                    power_state = "AC" if on_ac else "battery"
+                    log(f"On {power_state} (mode=off) — releasing inhibitor")
                     inhibitor.uninhibit()
                     grace_remaining = 0
                     prev_frame = None
-                else:
-                    log("On battery — skipping check")
                 time.sleep(CHECK_INTERVAL)
                 continue
 
-            use_motion_now = on_ac if not use_motion else True
-            mode_name = "motion" if use_motion_now else "face"
-
             gray = capture_frame()
-            if use_motion_now:
+            if mode == "motion":
                 if gray is not None:
                     present, diff = detect_motion(gray, prev_frame)
                     prev_frame = gray
@@ -255,12 +253,12 @@ def run_loop(use_motion=False):
                     present, diff = False, 0.0
             else:
                 present = gray is not None and len(detect_faces(gray)) > 0
-                # Reset prev_frame when switching from motion to face
+                # Reset prev_frame when not in motion mode
                 prev_frame = None
 
             if present:
                 grace_remaining = GRACE_CHECKS
-                if use_motion_now:
+                if mode == "motion":
                     detail = f"diff={diff:.1f}" if diff > 0 else "first frame"
                     log_msg = f"Motion detected ({detail}) — "
                 else:
@@ -273,15 +271,15 @@ def run_loop(use_motion=False):
             else:
                 if grace_remaining > 0:
                     grace_remaining -= 1
-                    if use_motion_now:
+                    if mode == "motion":
                         log(f"No motion (diff={diff:.1f}) — grace ({grace_remaining} remaining)")
                     else:
                         log(f"No face — grace period ({grace_remaining} checks remaining)")
                 else:
                     if inhibitor.active:
-                        log(f"No {mode_name} detected — releasing inhibitor")
+                        log(f"No {mode} detected — releasing inhibitor")
                     else:
-                        log(f"No {mode_name} detected — idle allowed")
+                        log(f"No {mode} detected — idle allowed")
                     inhibitor.uninhibit()
 
         except Exception as e:
@@ -357,15 +355,25 @@ def get_running_pid():
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Keep screen on while face is visible")
+    mode_choices = ["face", "motion", "off"]
+    parser = argparse.ArgumentParser(description="Keep screen on while presence is detected")
     parser.add_argument("--daemon", action="store_true", help="Run in background")
     parser.add_argument("--stop", action="store_true", help="Stop running daemon")
     parser.add_argument("--status", action="store_true", help="Check if running")
+    parser.add_argument("--ac-mode", choices=mode_choices, default="motion",
+                        help="Detection mode on AC power (default: motion)")
+    parser.add_argument("--battery-mode", choices=mode_choices, default="face",
+                        help="Detection mode on battery (default: face)")
     parser.add_argument("--motion", action="store_true",
-                        help="Use motion detection instead of face detection (better for profile/side angles)")
+                        help="Legacy shorthand for --ac-mode motion --battery-mode off")
     parser.add_argument("--debug-capture", action="store_true",
                         help="Capture frames every 5s for 30s, save to /tmp/smart-stay-debug/")
     args = parser.parse_args()
+
+    # --motion is legacy shorthand
+    if args.motion:
+        args.ac_mode = "motion"
+        args.battery_mode = "off"
 
     if args.stop:
         pid = get_running_pid()
@@ -385,7 +393,7 @@ def main():
         return
 
     if args.debug_capture:
-        debug_capture(use_motion=args.motion)
+        debug_capture(use_motion=args.ac_mode == "motion")
         return
 
     existing = get_running_pid()
@@ -406,7 +414,7 @@ def main():
         os.dup2(log_fd.fileno(), sys.stdout.fileno())
         os.dup2(log_fd.fileno(), sys.stderr.fileno())
 
-    run_loop(use_motion=args.motion)
+    run_loop(ac_mode=args.ac_mode, battery_mode=args.battery_mode)
 
 
 if __name__ == "__main__":

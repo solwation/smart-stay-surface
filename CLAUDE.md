@@ -10,7 +10,9 @@ Single-file Python script (`smart-stay`) — no build system, no package manager
 
 **Face detection** (default mode): `dlib.get_frontal_face_detector()` (HOG-based) with upsample=1 for better detection at distance. Runs on full 1280x720 grayscale with histogram equalization applied first (numpy LUT-based) to handle backlighting and low-light conditions. Fast enough for a 30s polling loop.
 
-**Motion detection** (`--motion` mode): Compares consecutive frames by downscaling to 320x240 and computing mean absolute pixel difference. Threshold of 5.0 (configurable via `MOTION_THRESHOLD`). Better than face detection when the camera sees a profile/side angle. At 30s intervals, even subtle movements (typing, shifting) register well above threshold.
+**Motion detection**: Compares consecutive frames by downscaling to 320x240 and computing mean absolute pixel difference. Threshold of 5.0 (configurable via `MOTION_THRESHOLD`). Better than face detection when the camera sees a profile/side angle. At 30s intervals, even subtle movements (typing, shifting) register well above threshold.
+
+**Adaptive mode**: Detection method is configurable per power state via `--ac-mode` and `--battery-mode` flags (choices: `face`, `motion`, `off`). Defaults: motion on AC, face on battery. The `--motion` flag is legacy shorthand for `--ac-mode motion --battery-mode off`.
 
 **Idle inhibit**: GNOME SessionManager DBus (`org.gnome.SessionManager.Inhibit` with flag 8). Acquire/release pattern with a cookie.
 
@@ -19,7 +21,7 @@ Single-file Python script (`smart-stay`) — no build system, no package manager
 ## Key files
 - `smart-stay` — the main script, installed to `~/bin/`
 - `smart-stay.service` — systemd user service, installed to `~/.config/systemd/user/`
-- `install.sh` — copies both files to the right places. Accepts `--motion` to install with motion detection mode.
+- `install.sh` — copies both files to the right places. Accepts `--ac-mode`/`--battery-mode` to configure detection per power state, or `--motion` for legacy motion-only mode.
 
 ## Hardware specifics
 - Front camera: libcamera index 1 (`\_SB_.PCI0.I2C2.CAMF`)
