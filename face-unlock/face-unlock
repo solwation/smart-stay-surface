@@ -1,0 +1,331 @@
+#!/usr/bin/env python3
+"""
+face-unlock: Unlock the GNOME lock screen with the Surface IR (Windows Hello) camera.
+
+Captures from the ov7251 IR camera straight over V4L2 (libcamera's IPU3
+pipeline only handles Bayer sensors, and the mono IR sensor needs no ISP),
+with the IR illuminator driven by the sensor strobe (kernel7/fix-ov7251.sh).
+Faces are detected with OpenCV YuNet and compared with SFace embeddings.
+
+Usage (as root):
+    face-unlock enroll [USER]   # record the face of USER (default: the pkexec/sudo caller)
+    face-unlock add [USER]      # like enroll, but keep the existing samples (glasses, light...)
+    face-unlock test [USER]     # try a match and print the scores
+    face-unlock remove [USER]   # delete the enrolled face
+    face-unlock snapshot FILE   # save one (rotated, equalized) IR frame as PNG
+    face-unlock auth            # PAM mode (pam_exec): exit 0 on a match
+"""
+
+import fcntl
+import os
+import pwd
+import select
+import subprocess
+import sys
+import syslog
+import time
+
+import cv2
+import numpy as np
+
+MODEL_DIR = "/usr/local/share/face-unlock"
+DETECT_MODEL = os.path.join(MODEL_DIR, "face_detection_yunet_2023mar.onnx")
+RECOG_MODEL = os.path.join(MODEL_DIR, "face_recognition_sface_2021dec.onnx")
+DATA_DIR = "/etc/face-unlock"
+LOCK_FILE = "/run/face-unlock.lock"
+
+MEDIA_DEV = "/dev/media0"
+SENSOR = '"ov7251 3-0060"'
+CSI2 = '"ipu3-csi2 2"'
+SENSOR_SUBDEV = "/dev/v4l-subdev8"
+VIDEO_DEV = "/dev/video2"
+WIDTH, HEIGHT = 640, 480
+# IPU3 packed 10-bit: 25 pixels in 32 bytes, lines padded to whole blocks
+BYTES_PER_LINE = (WIDTH + 24) // 25 * 32
+FRAME_BYTES = BYTES_PER_LINE * HEIGHT
+EXPOSURE = 1700            # max at default vblank (~30 fps)
+GAIN = 160                 # 16 = 1x
+
+DETECT_SCORE = 0.8         # YuNet confidence to accept a face
+MATCH_THRESHOLD = 0.5      # SFace cosine similarity (OpenCV suggests 0.363; stricter here)
+MATCHES_NEEDED = 2         # frames above threshold before accepting
+AUTH_TIMEOUT = 3.5         # seconds of scanning in PAM mode
+ENROLL_SECONDS = 8
+ENROLL_MAX = 20            # embeddings kept per user
+ENROLL_MIN_SIM = 0.5       # drop samples less similar than this to the rest (bad angle, hand)
+
+
+class CameraError(Exception):
+    pass
+
+
+def unpack_ipu3_y10(buf):
+    """IPU3 packed 10-bit greyscale -> uint16 HxW."""
+    blocks = BYTES_PER_LINE // 32
+    b = np.frombuffer(buf, np.uint8, FRAME_BYTES).reshape(HEIGHT, blocks, 32)
+    bits = np.unpackbits(b, axis=2, bitorder="little")[:, :, :250]
+    bits = bits.reshape(HEIGHT, blocks, 25, 10).astype(np.uint16)
+    v = (bits << np.arange(10, dtype=np.uint16)).sum(3, dtype=np.uint16)
+    return v.reshape(HEIGHT, -1)[:, :WIDTH]
+
+
+def run(*cmd):
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode:
+        raise CameraError(f"{cmd[0]} failed: {r.stderr.strip() or r.returncode}")
+
+
+def frames(timeout):
+    """Yield raw IR frames for up to `timeout` seconds."""
+    # The sensor -> CSI-2 link is off by default and not persistent.
+    run("media-ctl", "-d", MEDIA_DEV, "-l", f"{SENSOR}:0 -> {CSI2}:0[1]")
+    run("media-ctl", "-d", MEDIA_DEV, "-V", f"{CSI2}:0 [fmt:Y10_1X10/{WIDTH}x{HEIGHT}]")
+    run("v4l2-ctl", "-d", SENSOR_SUBDEV, "-c", f"exposure={EXPOSURE},gain={GAIN}")
+    proc = subprocess.Popen(
+        ["v4l2-ctl", "-d", VIDEO_DEV,
+         f"--set-fmt-video=width={WIDTH},height={HEIGHT},pixelformat=ip3y",
+         "--stream-mmap", "--stream-to=-"],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    deadline = time.monotonic() + timeout
+    buf = b""
+    try:
+        while time.monotonic() < deadline:
+            ready, _, _ = select.select([proc.stdout], [], [], 0.5)
+            if not ready:
+                continue
+            chunk = os.read(proc.stdout.fileno(), FRAME_BYTES)
+            if not chunk:
+                raise CameraError("IR camera stream ended (device busy?)")
+            buf += chunk
+            while len(buf) >= FRAME_BYTES:
+                frame, buf = buf[:FRAME_BYTES], buf[FRAME_BYTES:]
+                yield frame
+    finally:
+        proc.terminate()
+        proc.wait()
+
+
+class FaceEngine:
+    def __init__(self):
+        self.detector = cv2.FaceDetectorYN.create(
+            DETECT_MODEL, "", (WIDTH, HEIGHT), DETECT_SCORE)
+        self.recognizer = cv2.FaceRecognizerSF.create(RECOG_MODEL, "")
+        self.clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        self.rotation = None   # quarter turns; the tablet may be held any way
+
+    def prepare(self, raw, rotation):
+        grey = (unpack_ipu3_y10(raw) >> 2).astype(np.uint8)
+        grey = np.ascontiguousarray(np.rot90(grey, rotation))
+        return cv2.cvtColor(self.clahe.apply(grey), cv2.COLOR_GRAY2BGR)
+
+    def embed(self, raw):
+        """Return (embedding, image) of the largest face in the frame, or (None, image)."""
+        # The sensor sits rotated in the bezel: 1 quarter turn was upright in testing.
+        order = [self.rotation] if self.rotation is not None else []
+        order += [r for r in (1, 3, 0, 2) if r != self.rotation]
+        img = None
+        for rot in order:
+            img = self.prepare(raw, rot)
+            self.detector.setInputSize((img.shape[1], img.shape[0]))
+            _, faces = self.detector.detect(img)
+            if faces is None:
+                continue
+            self.rotation = rot
+            face = max(faces, key=lambda f: f[2] * f[3])
+            feat = self.recognizer.feature(self.recognizer.alignCrop(img, face))
+            return cv2.normalize(feat, None).flatten(), img
+        return None, img
+
+
+def valid_user(user):
+    if not user or "/" in user or user.startswith("."):
+        return False
+    try:
+        return pwd.getpwnam(user).pw_uid >= 1000
+    except KeyError:
+        return False
+
+
+def data_file(user):
+    return os.path.join(DATA_DIR, f"{user}.npy")
+
+
+def load_faces(user):
+    try:
+        return np.load(data_file(user))
+    except FileNotFoundError:
+        return None
+
+
+def best_score(known, emb):
+    return float(np.max(known @ emb))
+
+
+def target_user(args):
+    if args:
+        return args[0]
+    if os.environ.get("SUDO_USER"):
+        return os.environ["SUDO_USER"]
+    if os.environ.get("PKEXEC_UID"):
+        return pwd.getpwuid(int(os.environ["PKEXEC_UID"])).pw_name
+    sys.exit("Give the user name: face-unlock enroll USER")
+
+
+def single_instance():
+    fd = os.open(LOCK_FILE, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return None
+    return fd
+
+
+def cmd_enroll(user, add=False):
+    if not valid_user(user):
+        sys.exit(f"{user} is not a regular user.")
+    engine = FaceEngine()
+    print(f"Enrolling {user}: look at the camera (top right of the screen) and "
+          f"turn your head slightly for {ENROLL_SECONDS} s...")
+    embs = []
+    for i, raw in enumerate(frames(ENROLL_SECONDS)):
+        if i % 3:
+            continue
+        emb, _ = engine.embed(raw)
+        if emb is not None:
+            embs.append(emb)
+    if len(embs) < 5:
+        sys.exit(f"Only {len(embs)} usable frames -- sit closer / face the camera and retry.")
+    embs = np.stack(embs).astype(np.float32)
+    # Outliers widen what gets accepted (auth takes the best match over all samples)
+    sim = embs @ embs.T
+    np.fill_diagonal(sim, np.nan)
+    mean_sim = np.nanmean(sim, axis=1)
+    keep = mean_sim >= max(ENROLL_MIN_SIM, float(np.median(mean_sim)) - 0.15)
+    embs = embs[keep]
+    if len(embs) < 5:
+        sys.exit("Too few consistent frames -- face the camera and retry.")
+    # Keep a spread of samples rather than 20 near-identical ones
+    idx = np.linspace(0, len(embs) - 1, min(ENROLL_MAX, len(embs))).astype(int)
+    known = embs[idx]
+    os.makedirs(DATA_DIR, mode=0o700, exist_ok=True)
+    old = load_faces(user)
+    if add and old is not None:
+        known = np.concatenate([old, known])
+    tmp = data_file(user) + ".tmp"
+    with open(os.open(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600), "wb") as f:
+        np.save(f, known)
+    os.replace(tmp, data_file(user))
+    self_sim = known @ known.T
+    print(f"Saved {len(known)} samples to {data_file(user)} ({(~keep).sum()} outliers dropped, "
+          f"self-similarity min {self_sim.min():.2f}, rotation {engine.rotation}).")
+
+
+def cmd_test(user):
+    known = load_faces(user)
+    if known is None:
+        sys.exit(f"{user} is not enrolled.")
+    engine = FaceEngine()
+    t0 = time.monotonic()
+    scores = []
+    for raw in frames(AUTH_TIMEOUT):
+        emb, _ = engine.embed(raw)
+        s = best_score(known, emb) if emb is not None else None
+        scores.append(s)
+        print(f"{time.monotonic() - t0:5.2f}s  " +
+              ("no face" if s is None else f"score {s:.3f}{'  MATCH' if s >= MATCH_THRESHOLD else ''}"))
+    hits = sum(1 for s in scores if s is not None and s >= MATCH_THRESHOLD)
+    print(f"{hits}/{len(scores)} frames matched (threshold {MATCH_THRESHOLD}, need {MATCHES_NEEDED}).")
+
+
+def cmd_snapshot(path):
+    engine = FaceEngine()
+    for i, raw in enumerate(frames(3)):
+        if i < 3:
+            continue
+        emb, img = engine.embed(raw)
+        cv2.imwrite(path, img)
+        print(f"Saved {path} ({'face found' if emb is not None else 'no face'}).")
+        return
+
+
+def has_local_graphical_session(user):
+    """Face unlock is only for unlocking a running session: at first login the
+    password is needed anyway to unlock the GNOME keyring."""
+    out = subprocess.run(["loginctl", "show-user", user, "-p", "Sessions", "--value"],
+                         capture_output=True, text=True).stdout.split()
+    for sid in out:
+        props = dict(line.split("=", 1) for line in subprocess.run(
+            ["loginctl", "show-session", sid, "-p", "Type", "-p", "Class", "-p", "Remote"],
+            capture_output=True, text=True).stdout.splitlines() if "=" in line)
+        if (props.get("Class") == "user" and props.get("Remote") == "no"
+                and props.get("Type") in ("wayland", "x11")):
+            return True
+    return False
+
+
+def cmd_auth():
+    user = os.environ.get("PAM_USER", "")
+    if os.environ.get("PAM_TYPE") != "auth" or not valid_user(user):
+        return 1
+    os.environ["PATH"] = "/usr/sbin:/usr/bin:/sbin:/bin"   # pam_exec passes no PATH
+    known = load_faces(user)
+    if known is None or not has_local_graphical_session(user):
+        return 1
+    if single_instance() is None:
+        return 1
+    syslog.openlog("face-unlock", facility=syslog.LOG_AUTH)
+    print("Looking for your face...", flush=True)
+    engine = FaceEngine()
+    t0 = time.monotonic()
+    hits, best, seen = 0, -1.0, 0
+    try:
+        for raw in frames(AUTH_TIMEOUT):
+            emb, _ = engine.embed(raw)
+            if emb is None:
+                continue
+            seen += 1
+            s = best_score(known, emb)
+            best = max(best, s)
+            if s >= MATCH_THRESHOLD:
+                hits += 1
+                if hits >= MATCHES_NEEDED:
+                    syslog.syslog(f"match for {user} ({os.environ.get('PAM_SERVICE')}): "
+                                  f"score {s:.3f} after {time.monotonic() - t0:.2f}s")
+                    return 0
+    except CameraError as e:
+        syslog.syslog(syslog.LOG_WARNING, str(e))
+        return 1
+    syslog.syslog(f"no match for {user}: {seen} faces, best score {best:.3f}")
+    return 1
+
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
+        print(__doc__.strip())
+        return 0
+    cmd, args = sys.argv[1], sys.argv[2:]
+    if cmd == "auth":
+        try:
+            return cmd_auth()
+        except Exception as e:   # never let a bug block the password fallback
+            syslog.syslog(syslog.LOG_ERR, f"auth error: {e!r}")
+            return 1
+    if os.geteuid() != 0:
+        sys.exit("Run as root (pkexec face-unlock ...).")
+    if cmd in ("enroll", "add"):
+        cmd_enroll(target_user(args), add=cmd == "add")
+    elif cmd == "test":
+        cmd_test(target_user(args))
+    elif cmd == "remove":
+        user = target_user(args)
+        os.remove(data_file(user))
+        print(f"Removed {data_file(user)}.")
+    elif cmd == "snapshot" and args:
+        cmd_snapshot(args[0])
+    else:
+        sys.exit(__doc__.strip())
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

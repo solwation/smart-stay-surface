@@ -195,6 +195,57 @@ systemctl status 'iptsd@*' touch-gestures           # daemons
 grep -A1 -E 'IPTSD|Touch Gestures' /proc/bus/input/devices
 ```
 
+## Face unlock (IR camera)
+
+Not part of smart-stay either: `face-unlock/` unlocks the GNOME lock screen with the
+Windows Hello IR camera, like Howdy but working with IPU3. Two things stand in the way on
+stock Ubuntu 26.04:
+
+1. **The IR camera is invisible to libcamera.** The ov7251 (ACPI `INT347E`) is a mono sensor
+   and libcamera's IPU3 pipeline only drives Bayer sensors, so `cam -l` lists only the front
+   and rear cameras. It doesn't need an ISP though: `face-unlock` enables the (off by default,
+   non-persistent) `ov7251 → ipu3-csi2 2` media link and reads 640x480 IPU3-packed 10-bit
+   greyscale straight from CIO2 (`/dev/video2`, `ip3y`) with `v4l2-ctl`.
+2. **The IR illuminator stays dark.** It is not a GPIO of the INT3472 (the IR sensor's
+   `SKC2` only has clock-enable and reset) but hangs off the sensor's strobe output, which the
+   upstream driver never enables — frames are near-black indoors. `kernel7/fix-ov7251.sh`
+   installs DKMS `ov7251-surface/1.0` (`kernel7/ov7251-ir-strobe.patch`), which routes the
+   strobe to the LED pad (`0x3005 = 0x08`) and fires it every frame (`0x3b81 = 0xff`) while
+   streaming, only for `INT347E`. Module parameter `ir_strobe=0` turns it off. Values as found
+   by linux-surface ([#739](https://github.com/linux-surface/linux-surface/issues/739),
+   [#2252](https://github.com/linux-surface/linux-surface/pull/2252)).
+
+Recognition uses OpenCV (apt `python3-opencv`; dlib isn't packaged for 26.04): YuNet finds
+the face (all four rotations are tried, the tablet may be held any way and the sensor is mounted
+rotated), CLAHE evens out the IR exposure, SFace turns it into an embedding that is
+compared (cosine) against the enrolled samples. Unlock needs 2 frames ≥ 0.5 within 3.5 s
+(own face scores ~0.7–0.77 here; OpenCV's same-person threshold is 0.363).
+
+```bash
+pkexec kernel7/fix-ov7251.sh          # IR illuminator (DKMS, MOK-signed, PCR 7 unaffected)
+pkexec face-unlock/install.sh         # deps, models (sha256-pinned), PAM line in gdm-password
+pkexec face-unlock enroll             # ~8 s, look at the camera and move your head a little
+pkexec face-unlock add                # extra samples (glasses, other light) on top
+pkexec face-unlock test               # per-frame scores
+pkexec face-unlock/install.sh --uninstall   # remove the PAM line again
+journalctl -t face-unlock             # match / no match log
+```
+
+How it hooks in: `auth [success=done default=ignore] pam_exec.so quiet stdout
+/usr/local/bin/face-unlock auth` right before `@include common-auth` in
+`/etc/pam.d/gdm-password`. A match ends the auth stack; anything else — no face, not enrolled,
+camera error, even a crash — returns failure and GDM asks for the password as usual.
+
+Deliberate limits:
+
+- **Lock screen only.** It only answers when the user already has a local graphical session;
+  the first login after boot always takes the password (that's what unlocks the GNOME
+  keyring). `sudo`/`pkexec` are not hooked up.
+- **Not Windows Hello grade.** IR defeats photos shown on a screen (LCDs are dark in IR) and
+  makes lighting consistent, but there is no depth or liveness check: a good IR-bright
+  print of your face might pass. The enrolled embeddings live in `/etc/face-unlock/<user>.npy`
+  (root, 0600). Weigh this against what the lock screen protects.
+
 ## License
 
 [MIT](LICENSE) — Olof Wingren

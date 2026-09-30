@@ -23,6 +23,7 @@ Single-file Python script (`smart-stay`) — no build system, no package manager
 ## Key files
 - `smart-stay` — the main script, installed to `~/bin/`
 - `smart-stay.service` — systemd user service, installed to `~/.config/systemd/user/`
+- `face-unlock/` — lock-screen face unlock with the IR camera (unrelated to smart-stay itself, see README "Face unlock")
 - `ipts/`, `touch/` — Surface Pro 5 touchscreen on kernel 7.0 (unrelated to smart-stay itself, see README "Touchscreen")
 - `install.sh` — copies both files to the right places. Accepts `--ac-mode`/`--battery-mode` to configure detection per power state, or `--motion` for legacy motion-only mode.
 
@@ -44,6 +45,13 @@ Single-file Python script (`smart-stay`) — no build system, no package manager
 - `touch/touch-gestures` is a root system service (EVIOCGRAB on "IPTSD Virtual Touchscreen" + two uinput devices). State machine: HOLD (single finger held ≤ HOLD_MS waiting for a 2nd) → GESTURE (2 fingers buffered until DECIDE_MM movement) → SCROLL (wheel) or PASS (buffer replayed as touch — pinch, 3+ fingers, timeouts). Frames dropped during SCROLL mean the output device's MT slot/axis state can diverge from the source, so `forward()` always re-selects the slot and resends full contact state on a new tracking ID.
 - The scroll device is an absolute pointer (ABS_X/Y + BTN_LEFT + wheels) so the wheel lands under the fingers; udev classes it as a mouse. Mapping assumes a single display.
 - Wheel direction is "natural" (content follows fingers). GNOME's *mouse* natural-scroll setting applies to this device and would invert it.
+
+## Face unlock (face-unlock/)
+- IR camera = ov7251 (`INT347E`, `\_SB_.PCI0.I2C3.CAM3`, I2C bus 3 addr 0x60) on `/dev/media0`: `"ov7251 3-0060"` → `"ipu3-csi2 2"` (link off by default, reset at boot) → `ipu3-cio2 2` = `/dev/video2`, subdev `/dev/v4l-subdev8`. Not in libcamera (IPU3 pipeline is Bayer-only). Format `ip3y` = IPU3 packed 10-bit, 25 px / 32 bytes, 832 bytes/line at 640 wide.
+- IR LED = sensor strobe (PAD_OUT1), not an INT3472 GPIO (`SKC2` `_DSM`: 0x0C clk-enable, 0x00 reset). Stock driver leaves 0x3005=0x00, 0x3b81=0xa5 → dark. DKMS `ov7251-surface` writes 0x3005=0x08 / 0x3b81=0xff in `s_stream` (clears 0x3005 on stop). Reloading ov7251 needs `echo i2c-INT347E:00 > /sys/bus/i2c/drivers/ov7251/unbind` first (the CIO2 v4l2_device holds a module ref); the other cameras survive it.
+- Sensor is mounted a quarter turn off: `np.rot90(img, 1)` was upright in all testing (all four are tried anyway). Exposure 1700 (max at default vblank) + gain 160 with the LED; CLAHE before YuNet/SFace.
+- `auth` mode must never block the password: every failure path returns 1, `PATH` is set explicitly (pam_exec passes none), flock on `/run/face-unlock.lock` so parallel attempts don't fight over the camera.
+- Test PAM changes in a scratch service with `pamtester` before touching `gdm-password`.
 
 ## Conventions
 - No virtualenv — all deps are system apt packages

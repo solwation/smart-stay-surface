@@ -1,0 +1,64 @@
+--- a/ov7251.c
++++ b/ov7251.c
+@@ -6,6 +6,7 @@
+  * Copyright (c) 2017-2018, Linaro Ltd.
+  */
+ 
++#include <linux/acpi.h>
+ #include <linux/bitops.h>
+ #include <linux/clk.h>
+ #include <linux/delay.h>
+@@ -1334,6 +1335,27 @@
+ 	return 0;
+ }
+ 
++/*
++ * Surface (IPU3 generation, ACPI INT347E): the IR flood illuminator is driven
++ * by the sensor's strobe output. 0x3005 = 0x08 routes the strobe to the pad
++ * that switches the LED MOSFET, 0x3b81 = 0xff fires the strobe every frame.
++ * Values as used by Windows' ov7251.sys.
++ */
++static bool ir_strobe = true;
++module_param(ir_strobe, bool, 0644);
++MODULE_PARM_DESC(ir_strobe, "Drive the IR illuminator while streaming (INT347E only)");
++
++#define OV7251_PAD_OUT1_REG		0x3005
++#define OV7251_PAD_OUT1_STROBE		0x08
++#define OV7251_STROBE_PATTERN_REG	0x3b81
++#define OV7251_STROBE_EVERY_FRAME	0xff
++
++static bool ov7251_has_ir_strobe(struct ov7251 *ov7251)
++{
++	return ir_strobe && acpi_dev_hid_match(ACPI_COMPANION(ov7251->dev),
++					       "INT347E");
++}
++
+ static int ov7251_s_stream(struct v4l2_subdev *subdev, int enable)
+ {
+ 	struct ov7251 *ov7251 = to_ov7251(subdev);
+@@ -1368,6 +1390,16 @@
+ 			dev_err(ov7251->dev, "could not sync v4l2 controls\n");
+ 			goto err_power_down;
+ 		}
++		if (ov7251_has_ir_strobe(ov7251)) {
++			ret = ov7251_write_reg(ov7251, OV7251_PAD_OUT1_REG,
++					       OV7251_PAD_OUT1_STROBE);
++			if (!ret)
++				ret = ov7251_write_reg(ov7251,
++						       OV7251_STROBE_PATTERN_REG,
++						       OV7251_STROBE_EVERY_FRAME);
++			if (ret)
++				goto err_power_down;
++		}
+ 		ret = ov7251_write_reg(ov7251, OV7251_SC_MODE_SELECT,
+ 				       OV7251_SC_MODE_SELECT_STREAMING);
+ 		if (ret)
+@@ -1375,6 +1407,8 @@
+ 	} else {
+ 		ret = ov7251_write_reg(ov7251, OV7251_SC_MODE_SELECT,
+ 				       OV7251_SC_MODE_SELECT_SW_STANDBY);
++		/* The mode tables reset these, but don't leave the LED routed */
++		ov7251_write_reg(ov7251, OV7251_PAD_OUT1_REG, 0x00);
+ 		pm_runtime_put(ov7251->dev);
+ 	}
+ 
