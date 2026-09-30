@@ -87,7 +87,7 @@ On Ubuntu 26.04 (kernel 7.0, libcamera 0.7) the setup differs from older release
   - Under Secure Boot, DKMS signs the module with the Ubuntu MOK key (`/var/lib/shim-signed/mok/MOK.der`), which must already be enrolled. Signing modules with an enrolled MOK does not change PCR 7, so TPM2 disk auto-unlock bound to PCR 7 keeps working.
   - DKMS rebuilds the module automatically on kernel updates. Once Ubuntu ships a kernel with the fix, the script detects it and skips.
 - **The tuning fix is no longer needed.** libcamera 0.7's `uncalibrated.yaml` already enables Agc/Awb/BlackLevelCorrection/ToneMapping, and `fix-camera.sh` detects this and skips.
-- **The rear camera (ov8865) still produces black frames.** The sensor keeps sending 1632x1224-sized frames whatever mode is configured (`ipu3-cio2: payload length is 10340352, received 2585088`). smart-stay only uses the front camera, so this doesn't matter here.
+- **The rear camera (ov8865) works up to 1632x1224** (e.g. 1280x720 at ~30 fps). **Full resolution (3264x2448) still produces black frames**: the sensor keeps sending 1632x1224-sized frames (`ipu3-cio2: payload length is 10340352, received 2585088`). The `payload length is 2585088, received 2588672` warning at working sizes is harmless. smart-stay only uses the front camera, so this doesn't matter here.
 - **No reboot needed** after `fix-vcm.sh`: reloading the module is enough.
 
 Useful diagnostics on this setup:
