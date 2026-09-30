@@ -74,6 +74,13 @@ sudo dkms install "$PKG/$VER"
 sudo modprobe -r dw9719 2>/dev/null || true
 sudo modprobe dw9719
 sleep 2
+# Reloading camera modules drops the cameras from PipeWire until WirePlumber
+# re-enumerates them (browsers/Teams then see no camera).
+if [[ $EUID -ne 0 ]]; then
+    systemctl --user restart wireplumber 2>/dev/null || true
+else
+    echo "Run as your user afterwards: systemctl --user restart wireplumber"
+fi
 
 echo ""
 cam -l 2>/dev/null || true

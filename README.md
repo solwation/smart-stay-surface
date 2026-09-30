@@ -101,6 +101,17 @@ cam --camera=2 --capture=30 --stream=role=viewfinder,width=1280,height=720 --fil
 
 Note that `cam` requires `=` for its optional-argument flags (`--capture=30`, not `-C 30`).
 
+### Cameras in Chrome / Teams
+
+IPU3 cameras can't be used through plain V4L2, so browsers only see them through the camera portal → PipeWire → libcamera. `kernel7/chrome-camera.sh` (run as your user) does the system side; Chrome needs two manual steps:
+
+1. **PipeWire libcamera plugin** (`libspa-0.2-libcamera`). `wpctl status` should list `ov5693`/`ov8865` as `[libcamera]` devices. Reloading camera modules (`fix-vcm.sh`, `fix-ov8865.sh`) drops them until `systemctl --user restart wireplumber`; both scripts now do that.
+2. **Chrome flag** `chrome://flags/#enable-webrtc-pipewire-camera` → Enabled, then `chrome://restart`.
+3. **Portal permission.** The portal's permission dialog fails for Chrome web apps (`xdg-desktop-portal: … Only the focused app is allowed to show a system access dialog`) because the PWA window's app ID differs from the requesting process (`com.google.Chrome`). The script grants it directly in the permission store; revoke in Settings → Privacy & Security → Camera.
+4. **Per-site permission.** A site that asked for permissions while no camera was available (Teams asked for the microphone only) won't ask again. Allow the camera in `chrome://settings/content/siteDetails?site=https://teams.cloud.microsoft` and reload.
+
+`chrome://settings/content/camera` listing *Built-in Front Camera* / *Built-in Back Camera* means everything up to Chrome works. libcamera cameras are exclusive: only one app can use a camera at a time. While a call holds the front camera, smart-stay's capture fails and counts as "nobody present" (Chrome normally keeps the screen awake during video calls itself). If a call starts during smart-stay's ~2 s capture, the browser may briefly report the camera as busy; retry.
+
 ## Usage
 
 ### Manual
