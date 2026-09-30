@@ -1,0 +1,31 @@
+--- a/dw9719.c
++++ b/dw9719.c
+@@ -448,6 +448,20 @@
+ };
+ MODULE_DEVICE_TABLE(of, dw9719_of_table);
+ 
++/*
++ * Local fix: v7.0 dropped the I2C ID table, so the "dw9719" client that
++ * ipu-bridge instantiates on ACPI (Surface) systems never matches.
++ * Restored from upstream master.
++ */
++static const struct i2c_device_id dw9719_id_table[] = {
++	{ .name = "dw9718s", .driver_data = (kernel_ulong_t)DW9718S },
++	{ .name = "dw9719", .driver_data = (kernel_ulong_t)DW9719 },
++	{ .name = "dw9761", .driver_data = (kernel_ulong_t)DW9761 },
++	{ .name = "dw9800k", .driver_data = (kernel_ulong_t)DW9800K },
++	{ }
++};
++MODULE_DEVICE_TABLE(i2c, dw9719_id_table);
++
+ static DEFINE_RUNTIME_DEV_PM_OPS(dw9719_pm_ops, dw9719_suspend, dw9719_resume,
+ 				 NULL);
+ 
+@@ -458,6 +472,7 @@
+ 		.of_match_table = dw9719_of_table,
+ 	},
+ 	.probe = dw9719_probe,
++	.id_table = dw9719_id_table,
+ 	.remove = dw9719_remove,
+ };
+ module_i2c_driver(dw9719_i2c_driver);

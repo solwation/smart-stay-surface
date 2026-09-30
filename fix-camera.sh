@@ -11,6 +11,14 @@
 
 set -euo pipefail
 
+# libcamera >= 0.7 (Ubuntu 26.04) ships an uncalibrated.yaml that already
+# enables these algorithms, so the per-sensor files are not needed there.
+UNCAL=/usr/share/libcamera/ipa/ipu3/uncalibrated.yaml
+if [[ -f "$UNCAL" && ! -L "$UNCAL" ]] && grep -q 'Agc' "$UNCAL" && grep -q 'Awb' "$UNCAL"; then
+    echo "uncalibrated.yaml already enables Agc/Awb -- tuning fix not needed."
+    exit 0
+fi
+
 echo "Writing ov5693 (front camera) tuning file..."
 sudo tee /usr/share/libcamera/ipa/ipu3/ov5693.yaml > /dev/null << 'EOF'
 # SPDX-License-Identifier: CC0-1.0

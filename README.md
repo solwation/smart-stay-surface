@@ -79,6 +79,28 @@ You can run `fix-camera.sh` independently if needed:
 sudo reboot
 ```
 
+### Ubuntu 26.04 / kernel 7.0
+
+On Ubuntu 26.04 (kernel 7.0, libcamera 0.7) the setup differs from older releases:
+
+- **No cameras at all** (`cam -l` lists nothing, `media-ctl -d /dev/media1 -p` shows the sensors with `0 link`). Kernel 7.0 dropped the I2C ID table from the `dw9719` driver for the rear camera's focus motor (VCM). The VCM never binds, and because the IPU3 CIO2 driver waits for *every* subdevice before linking any sensor, the front camera disappears too. `kernel7/fix-vcm.sh` (run automatically by `install.sh`) rebuilds `dw9719` with the ID table restored, as in upstream master, and installs it via DKMS. It is a no-op on kernels that don't need it.
+  - Under Secure Boot, DKMS signs the module with the Ubuntu MOK key (`/var/lib/shim-signed/mok/MOK.der`), which must already be enrolled. Signing modules with an enrolled MOK does not change PCR 7, so TPM2 disk auto-unlock bound to PCR 7 keeps working.
+  - DKMS rebuilds the module automatically on kernel updates. Once Ubuntu ships a kernel with the fix, the script detects it and skips.
+- **The tuning fix is no longer needed.** libcamera 0.7's `uncalibrated.yaml` already enables Agc/Awb/BlackLevelCorrection/ToneMapping, and `fix-camera.sh` detects this and skips.
+- **The rear camera (ov8865) still produces black frames.** The sensor keeps sending 1632x1224-sized frames whatever mode is configured (`ipu3-cio2: payload length is 10340352, received 2585088`). smart-stay only uses the front camera, so this doesn't matter here.
+- **No reboot needed** after `fix-vcm.sh`: reloading the module is enough.
+
+Useful diagnostics on this setup:
+
+```bash
+cam -l                                  # cameras libcamera can see
+media-ctl -d /dev/media1 -p | grep entity   # sensors should have "1 link"
+modinfo -F alias dw9719 | grep i2c      # empty = unfixed kernel 7.0 driver
+cam --camera=2 --capture=30 --stream=role=viewfinder,width=1280,height=720 --file=/tmp/f-#.bin
+```
+
+Note that `cam` requires `=` for its optional-argument flags (`--capture=30`, not `-C 30`).
+
 ## Usage
 
 ### Manual

@@ -28,7 +28,12 @@ Single-file Python script (`smart-stay`) — no build system, no package manager
 - Back camera: libcamera index 0 (`\_SB_.PCI0.I2C3.CAMR`)
 - AC power: `/sys/class/power_supply/ADP1/online`
 - Pixel format: NV12 (default from IPU3 pipeline), frame_size=1382400 at 1280x720 (921600 Y + 460800 UV). IPU3 ImgU requires >= 1280x720 — smaller resolutions produce all-black frames.
-- Tuning files: `/usr/share/libcamera/ipa/ipu3/ov5693.yaml` (front) and `ov8865.yaml` (back) — must have proper IPA algorithm config (Agc, Awb, BlackLevelCorrection, ToneMapping) or frames will be black. See `~/fix-camera.sh`.
+- Tuning files: `/usr/share/libcamera/ipa/ipu3/ov5693.yaml` (front) and `ov8865.yaml` (back) — must have proper IPA algorithm config (Agc, Awb, BlackLevelCorrection, ToneMapping) or frames will be black. See `fix-camera.sh`. Not needed on libcamera >= 0.7, whose `uncalibrated.yaml` already has them (the script detects this).
+
+## Kernel 7.0 / Ubuntu 26.04
+- Kernel 7.0's `dw9719` (rear VCM) driver has no I2C ID table, so the ipu-bridge-created `dw9719` client never binds → CIO2 async notifier never completes → **no** sensor gets media links → libcamera lists zero cameras (front included). `kernel7/fix-vcm.sh` installs a DKMS build with the ID table restored (`kernel7/dw9719-id-table.patch`, matches upstream master). Diagnose with `media-ctl -d /dev/media1 -p` (sensors with "0 link") and `modinfo -F alias dw9719` (no `i2c:` aliases).
+- Sysfs `bind` returning ENODEV (the shell shows it as "I/O error") = no driver match, not a hardware problem. ftrace `function_graph` on `bind_store` works under Secure Boot lockdown (integrity mode); debugfs writes (dynamic_debug) do not.
+- Rear ov8865 still yields black frames on 7.0: CIO2 receives 1632x1224-sized payloads regardless of the configured mode. Unresolved; the front camera is unaffected.
 
 ## Conventions
 - No virtualenv — all deps are system apt packages

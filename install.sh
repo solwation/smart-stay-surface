@@ -59,6 +59,12 @@ echo ""
 echo "Fixing camera tuning files (requires sudo)..."
 "$SCRIPT_DIR/fix-camera.sh"
 
+# Kernel 7.0: restore dw9719 VCM driver matching, otherwise libcamera
+# finds no cameras at all (no-op on kernels that don't need it)
+echo ""
+echo "Checking dw9719 VCM driver (kernel 7.0 regression)..."
+"$SCRIPT_DIR/kernel7/fix-vcm.sh"
+
 # Install the script
 mkdir -p ~/bin
 cp "$SCRIPT_DIR/smart-stay" ~/bin/smart-stay
