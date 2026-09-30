@@ -110,7 +110,7 @@ IPU3 cameras can't be used through plain V4L2, so browsers only see them through
 3. **Portal permission.** The portal's permission dialog fails for Chrome web apps (`xdg-desktop-portal: … Only the focused app is allowed to show a system access dialog`) because the PWA window's app ID differs from the requesting process (`com.google.Chrome`). The script grants it directly in the permission store; revoke in Settings → Privacy & Security → Camera.
 4. **Per-site permission.** A site that asked for permissions while no camera was available (Teams asked for the microphone only) won't ask again. Allow the camera in `chrome://settings/content/siteDetails?site=https://teams.cloud.microsoft` and reload.
 
-`chrome://settings/content/camera` listing *Built-in Front Camera* / *Built-in Back Camera* means everything up to Chrome works. libcamera cameras are exclusive: only one app can use a camera at a time. While a call holds the front camera, smart-stay's capture fails and counts as "nobody present" (Chrome normally keeps the screen awake during video calls itself). If a call starts during smart-stay's ~2 s capture, the browser may briefly report the camera as busy; retry.
+`chrome://settings/content/camera` listing *Built-in Front Camera* / *Built-in Back Camera* means everything up to Chrome works. libcamera cameras are exclusive: only one app can use a camera at a time. smart-stay pauses while another app uses either camera (see Limitations). If a call starts during smart-stay's ~2 s capture, the browser may briefly report the camera as busy; retry.
 
 ## Usage
 
@@ -158,6 +158,7 @@ Edit the constants at the top of `smart-stay`:
 - **Surface / IPU3 only** — uses `libcamera` for camera access, which is needed for IPU3 cameras. Standard laptops with UVC cameras would need a different (simpler) capture approach using OpenCV directly.
 - **GNOME only** — uses GNOME SessionManager DBus for idle inhibit. Other desktop environments would need a different inhibit mechanism.
 - **Minimum resolution** — the IPU3 ImgU requires >= 1280x720 capture resolution. Lower resolutions produce black frames.
+- **Pauses while the camera is in use** — libcamera cameras are exclusive, so while another app (a video call, the Camera app) uses either camera, smart-stay can't capture. It detects this (acquire fails after its retries; on IPU3 both cameras share the CIO2/ImgU media devices, so the rear camera counts too), logs `Camera in use by another app — pausing detection`, and leaves the inhibitor and grace period untouched until the camera is free again. In motion mode the first frame after a pause counts as motion.
 - **Privacy** — frames are captured, processed in memory, and immediately discarded. Nothing is saved to disk (except in `--debug-capture` mode).
 
 ## Touchscreen (IPTS) on kernel 7.0

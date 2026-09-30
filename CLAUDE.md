@@ -14,6 +14,8 @@ Single-file Python script (`smart-stay`) — no build system, no package manager
 
 **Adaptive mode**: Detection method is configurable per power state via `--ac-mode` and `--battery-mode` flags (choices: `face`, `motion`, `off`). Defaults: motion on AC, face on battery. The `--motion` flag is legacy shorthand for `--ac-mode motion --battery-mode off`.
 
+**Camera busy**: `capture_frame()` raises `CameraBusy` when acquire still fails after its 3 retries (another process holds the camera; on IPU3 the front and rear cameras share media devices, so a rear-camera user blocks the front too). `run_loop` then pauses: inhibitor and grace untouched, `prev_frame` reset, logs only on pause/resume transitions. Other capture failures still return `None` (= nobody present).
+
 **Idle inhibit**: GNOME SessionManager DBus (`org.gnome.SessionManager.Inhibit` with flag 8). Acquire/release pattern with a cookie.
 
 **Power detection**: Reads `/sys/class/power_supply/ADP1/online` — returns "1" when on AC.

@@ -12,6 +12,7 @@ Detection method is configurable per power state:
   MODE is one of: face, motion, off
 
 Inhibits GNOME idle/screensaver via DBus when presence is detected.
+Pauses detection while another app (a video call, the Camera app) uses the camera.
 
 Usage:
     smart-stay                                    # default (AC=motion, battery=face)
@@ -53,11 +54,18 @@ def is_on_ac_power():
         return False
 
 
+class CameraBusy(Exception):
+    """The camera is in use by another process."""
+
+
 def capture_frame():
     """Capture a grayscale frame from the front camera. Returns numpy array or None.
 
     Captures at 1280x720 — the IPU3 ImgU produces black frames at lower resolutions.
     Retries camera acquisition up to 3 times (IPU3 needs time between release/acquire).
+    Raises CameraBusy if it still can't be acquired: another process holds it. On
+    IPU3 both cameras share the CIO2/ImgU media devices, so this also covers another
+    app using the rear camera.
     """
     cm = libcamera.CameraManager.singleton()
     if CAMERA_INDEX >= len(cm.cameras):
@@ -71,7 +79,7 @@ def capture_frame():
             break
         except RuntimeError:
             if attempt == 2:
-                return None
+                raise CameraBusy()
             time.sleep(1.0)
     try:
         config = cam.generate_configuration([libcamera.StreamRole.Viewfinder])
@@ -164,7 +172,10 @@ def detect_motion(gray, prev_frame):
 
 def check_for_face():
     """Capture a frame from the front camera and check for faces."""
-    gray = capture_frame()
+    try:
+        gray = capture_frame()
+    except CameraBusy:
+        return False
     if gray is None:
         return False
     return len(detect_faces(gray)) > 0
@@ -209,6 +220,7 @@ def run_loop(ac_mode="motion", battery_mode="face"):
     inhibitor = IdleInhibitor()
     grace_remaining = 0
     prev_frame = None
+    paused = False
 
     def cleanup(signum=None, frame=None):
         inhibitor.uninhibit()
@@ -244,7 +256,21 @@ def run_loop(ac_mode="motion", battery_mode="face"):
                 time.sleep(CHECK_INTERVAL)
                 continue
 
-            gray = capture_frame()
+            try:
+                gray = capture_frame()
+            except CameraBusy:
+                # Someone else is using the camera (e.g. a video call): leave the
+                # inhibitor and grace period as they are until it's free again.
+                if not paused:
+                    log("Camera in use by another app — pausing detection")
+                    paused = True
+                prev_frame = None
+                time.sleep(CHECK_INTERVAL)
+                continue
+            if paused:
+                log("Camera free again — resuming detection")
+                paused = False
+
             if mode == "motion":
                 if gray is not None:
                     present, diff = detect_motion(gray, prev_frame)
@@ -302,7 +328,12 @@ def debug_capture(use_motion=False):
     prev_frame = None
     for i in range(7):
         ts = time.strftime("%H:%M:%S")
-        gray = capture_frame()
+        try:
+            gray = capture_frame()
+        except CameraBusy:
+            print(f"  [{ts}] Frame {i}: camera in use by another app")
+            time.sleep(5)
+            continue
         if gray is None:
             print(f"  [{ts}] Frame {i}: FAILED to capture")
             time.sleep(5)
