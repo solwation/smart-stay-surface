@@ -1,0 +1,9 @@
+#!/bin/sh
+# IPTS touch (Surface Pro 5): put MEI IOMMU group (00:16.0 + 00:16.4) in
+# identity mode before mei_me binds, otherwise touch DMA is blocked (DMAR fault).
+# Installed by ~/ipts-touch-setup.sh; hooked in /etc/modprobe.d/mei-iommu-identity.conf
+g=/sys/bus/pci/devices/0000:00:16.4/iommu_group
+if [ -e "$g/type" ] && [ "$(cat "$g/type")" != identity ]; then
+	echo identity > "$g/type" 2>/dev/null || true
+fi
+exec /usr/sbin/modprobe --ignore-install mei_me "$@"

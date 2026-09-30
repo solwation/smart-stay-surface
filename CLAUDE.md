@@ -21,6 +21,7 @@ Single-file Python script (`smart-stay`) — no build system, no package manager
 ## Key files
 - `smart-stay` — the main script, installed to `~/bin/`
 - `smart-stay.service` — systemd user service, installed to `~/.config/systemd/user/`
+- `ipts/`, `touch/` — Surface Pro 5 touchscreen on kernel 7.0 (unrelated to smart-stay itself, see README "Touchscreen")
 - `install.sh` — copies both files to the right places. Accepts `--ac-mode`/`--battery-mode` to configure detection per power state, or `--motion` for legacy motion-only mode.
 
 ## Hardware specifics
@@ -34,6 +35,11 @@ Single-file Python script (`smart-stay`) — no build system, no package manager
 - Kernel 7.0's `dw9719` (rear VCM) driver has no I2C ID table, so the ipu-bridge-created `dw9719` client never binds → CIO2 async notifier never completes → **no** sensor gets media links → libcamera lists zero cameras (front included). `kernel7/fix-vcm.sh` installs a DKMS build with the ID table restored (`kernel7/dw9719-id-table.patch`, matches upstream master). Diagnose with `media-ctl -d /dev/media1 -p` (sensors with "0 link") and `modinfo -F alias dw9719` (no `i2c:` aliases).
 - Sysfs `bind` returning ENODEV (the shell shows it as "I/O error") = no driver match, not a hardware problem. ftrace `function_graph` on `bind_store` works under Secure Boot lockdown (integrity mode); debugfs writes (dynamic_debug) do not.
 - Rear ov8865 still yields black frames on 7.0: CIO2 receives 1632x1224-sized payloads regardless of the configured mode. Unresolved; the front camera is unaffected.
+
+## Touchscreen (ipts/, touch/)
+- `touch/touch-gestures` is a root system service (EVIOCGRAB on "IPTSD Virtual Touchscreen" + two uinput devices). State machine: HOLD (single finger held ≤ HOLD_MS waiting for a 2nd) → GESTURE (2 fingers buffered until DECIDE_MM movement) → SCROLL (wheel) or PASS (buffer replayed as touch — pinch, 3+ fingers, timeouts). Frames dropped during SCROLL mean the output device's MT slot/axis state can diverge from the source, so `forward()` always re-selects the slot and resends full contact state on a new tracking ID.
+- The scroll device is an absolute pointer (ABS_X/Y + BTN_LEFT + wheels) so the wheel lands under the fingers; udev classes it as a mouse. Mapping assumes a single display.
+- Wheel direction is "natural" (content follows fingers). GNOME's *mouse* natural-scroll setting applies to this device and would invert it.
 
 ## Conventions
 - No virtualenv — all deps are system apt packages

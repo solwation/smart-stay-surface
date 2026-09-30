@@ -149,6 +149,40 @@ Edit the constants at the top of `smart-stay`:
 - **Minimum resolution** — the IPU3 ImgU requires >= 1280x720 capture resolution. Lower resolutions produce black frames.
 - **Privacy** — frames are captured, processed in memory, and immediately discarded. Nothing is saved to disk (except in `--debug-capture` mode).
 
+## Touchscreen (IPTS) on kernel 7.0
+
+Not part of smart-stay, but lives here because it's the same machine. Getting full touch
+(tap, drag, two-finger scroll in *every* app, pinch-zoom, stylus) on a Surface Pro 5 with the
+stock Ubuntu 26.04 kernel takes four pieces:
+
+1. **ipts driver** — out-of-tree DKMS (`linux-surface/intel-precise-touch`). On kernel 7.0 its
+   raw data report is 3 bytes shorter than its own HID descriptor declares, which 7.0's
+   `hid_report_raw_event()` now rejects (`Event data for report 65 was too short (7487 vs 7484)`,
+   `ipts: Failed to process buffer: -22`) — everything looks alive but no touch arrives.
+   `ipts/ipts-kernel7-report-len.patch` fixes it; `pkexec ipts/apply-report-len-fix.sh`
+   rebuilds and reloads the patched source in `ipts/src/`.
+2. **IOMMU identity for the MEI group** — otherwise iptsd's DMA mode faults
+   (`DMAR … [00:16.4] PTE Read access is not set`). `ipts/system/mei-iommu-identity` is a
+   modprobe `install` hook (`ipts/system/mei-iommu-identity.conf` → `/etc/modprobe.d/`) that
+   switches IOMMU group 00:16.0+00:16.4 to `identity` before `mei_me` binds. Only that group is
+   affected; PCR 7 is not.
+3. **iptsd** v3.1.0 built from upstream (`linux-surface/iptsd`), with
+   `ipts/system/surface-pro-5-ipts-dkms.conf` in `/etc/iptsd.d/` (the DKMS driver reports vendor
+   `0x045E`, not the `0x1B96` the presets match).
+4. **touch-gestures** (`touch/`) — GNOME hands touchscreen input straight to apps, and apps
+   without their own touch scrolling (VTE terminals such as Ptyxis) can't be scrolled. This
+   daemon grabs iptsd's virtual touchscreen and re-emits it: one finger and 3+ fingers pass
+   through untouched, two fingers moving together become hi-res wheel events (with kinetic
+   scrolling) at the fingers, and two fingers pinching are replayed as touch so apps zoom
+   natively. Install with `pkexec touch/install.sh` (`--uninstall` to remove). Tunables are
+   constants at the top of `touch/touch-gestures`.
+
+```bash
+journalctl -b -k | grep -iE 'ipts|too short|DMAR'   # driver / IOMMU problems
+systemctl status 'iptsd@*' touch-gestures           # daemons
+grep -A1 -E 'IPTSD|Touch Gestures' /proc/bus/input/devices
+```
+
 ## License
 
 [MIT](LICENSE) — Olof Wingren

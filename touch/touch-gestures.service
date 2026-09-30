@@ -1,0 +1,12 @@
+[Unit]
+Description=Two-finger touchscreen scroll + pinch passthrough (touch-gestures)
+Documentation=https://github.com/solwation/smart-stay-surface
+After=systemd-udev-settle.service
+
+[Service]
+ExecStart=/usr/local/bin/touch-gestures
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

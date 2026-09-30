@@ -1,0 +1,354 @@
+#!/usr/bin/env python3
+"""Two-finger touchscreen scrolling for every app, pinch left intact.
+
+GNOME passes touchscreen touches straight to apps, and apps that don't
+implement touch scrolling themselves (VTE terminals like Ptyxis) can't be
+scrolled. This daemon sits between iptsd and the compositor:
+
+  IPTSD Virtual Touchscreen --grab--> touch-gestures --> "Touch Gestures Touchscreen"
+                                                     `-> "Touch Gestures Scroll" (wheel)
+
+- 1 finger:   passed through (held back at most HOLD_MS, to see if a 2nd finger lands)
+- 2 fingers moving together: turned into hi-res wheel events at the fingers,
+              with kinetic scrolling after release
+- 2 fingers moving apart/together (pinch): the whole gesture is replayed as
+              touch, so apps zoom natively
+- 3+ fingers: passed through (GNOME workspace/overview gestures)
+
+Runs as root (EVIOCGRAB + /dev/uinput). If it dies the grab is released and
+touch falls back to plain iptsd behaviour.
+"""
+
+import math
+import select
+import sys
+import time
+
+import evdev
+from evdev import AbsInfo, InputDevice, UInput, ecodes as e
+
+SOURCE_NAME = "IPTSD Virtual Touchscreen"
+TOUCH_NAME = "Touch Gestures Touchscreen"
+SCROLL_NAME = "Touch Gestures Scroll"
+
+HOLD_MS = 80              # wait this long for a second finger before passing a touch through
+HOLD_MOVE_MM = 3.0        # ...unless the single finger already moved this far (drag)
+DECIDE_MM = 4.0           # two-finger movement needed to classify scroll vs pinch
+DECIDE_TIMEOUT_MS = 350   # two fingers resting without a decision -> pass through as touch
+PINCH_RATIO = 1.0         # pinch if distance change > centroid move * ratio
+WHEEL_PER_MM = 16.0       # hi-res wheel units (120 = one notch) per mm of finger travel
+AXIS_LOCK_RATIO = 2.0     # lock to one axis when it dominates by this factor
+INERTIA_MIN_MM_S = 40.0   # release speed needed for kinetic scrolling
+INERTIA_STOP_MM_S = 8.0
+INERTIA_DECAY = 0.94      # per 16 ms tick
+INERTIA_TICK = 0.016
+VELOCITY_WINDOW_S = 0.08  # fingers still for longer than this at release -> no inertia
+
+MT_AXES = (e.ABS_MT_POSITION_X, e.ABS_MT_POSITION_Y, e.ABS_MT_TOUCH_MAJOR,
+           e.ABS_MT_TOUCH_MINOR, e.ABS_MT_ORIENTATION)
+
+
+def find_source(timeout=60):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        for path in evdev.list_devices():
+            dev = InputDevice(path)
+            if dev.name.startswith(SOURCE_NAME):
+                return dev
+            dev.close()
+        time.sleep(1)
+    sys.exit(f"touch-gestures: no '{SOURCE_NAME}' device found")
+
+
+class Gestures:
+    IDLE, HOLD, GESTURE, PASS, SCROLL = range(5)
+
+    def __init__(self, src):
+        self.src = src
+        caps = src.capabilities(absinfo=True)
+        caps.pop(e.EV_SYN, None)
+        absinfo = dict(caps[e.EV_ABS])
+        self.res_x = absinfo[e.ABS_MT_POSITION_X].resolution or 1
+        self.res_y = absinfo[e.ABS_MT_POSITION_Y].resolution or 1
+        info = src.info
+        self.touch = UInput(caps, name=TOUCH_NAME, vendor=info.vendor, product=info.product,
+                            bustype=e.BUS_VIRTUAL, input_props=[e.INPUT_PROP_DIRECT])
+        ax, ay = absinfo[e.ABS_X], absinfo[e.ABS_Y]
+        self.scroll = UInput({
+            e.EV_KEY: [e.BTN_LEFT, e.BTN_RIGHT, e.BTN_MIDDLE],
+            e.EV_REL: [e.REL_WHEEL, e.REL_HWHEEL, e.REL_WHEEL_HI_RES, e.REL_HWHEEL_HI_RES],
+            e.EV_ABS: [(e.ABS_X, AbsInfo(0, ax.min, ax.max, 0, 0, ax.resolution)),
+                       (e.ABS_Y, AbsInfo(0, ay.min, ay.max, 0, 0, ay.resolution))],
+        }, name=SCROLL_NAME, bustype=e.BUS_VIRTUAL)
+
+        self.slots = {}           # source slot -> {"id": int, axis: value, ...}
+        self.cur_slot = 0         # source's current slot while parsing
+        self.out_slot = None      # slot last selected on the output device
+        self.frame = []           # (type, code, value, slot) until SYN_REPORT
+        self.buffer = []          # held-back frames
+        self.state = self.IDLE
+        self.t0 = 0.0
+        self.start = None         # (centroid, distance, fingers) when gesture began
+        self.last_c = None
+        self.fingers = frozenset()
+        self.axis = None
+        self.acc = [0.0, 0.0]     # fractional hi-res wheel units (x, y)
+        self.notch = [0, 0]
+        self.vel = (0.0, 0.0)     # mm/s
+        self.last_move = 0.0
+        self.inertia = None
+
+    # ---- geometry (mm) -------------------------------------------------
+
+    def active(self):
+        return {s: v for s, v in self.slots.items() if v.get("id", -1) >= 0}
+
+    def points(self, fingers=None):
+        act = self.active()
+        keys = sorted(fingers if fingers is not None else act)
+        return [(act[s].get(e.ABS_MT_POSITION_X, 0) / self.res_x,
+                 act[s].get(e.ABS_MT_POSITION_Y, 0) / self.res_y) for s in keys if s in act]
+
+    @staticmethod
+    def centroid(pts):
+        return (sum(p[0] for p in pts) / len(pts), sum(p[1] for p in pts) / len(pts))
+
+    @staticmethod
+    def spread(pts):
+        return math.dist(pts[0], pts[1]) if len(pts) >= 2 else 0.0
+
+    # ---- output --------------------------------------------------------
+
+    def forward(self, frame):
+        for typ, code, value, slot in frame:
+            if typ == e.EV_ABS and code == e.ABS_MT_SLOT:
+                continue  # emitted on demand below
+            if typ == e.EV_ABS and e.ABS_MT_TOUCH_MAJOR <= code <= e.ABS_MT_TOOL_Y:
+                if self.out_slot != slot:
+                    self.touch.write(e.EV_ABS, e.ABS_MT_SLOT, slot)
+                    self.out_slot = slot
+                self.touch.write(typ, code, value)
+                if code == e.ABS_MT_TRACKING_ID and value >= 0:
+                    # The source may have skipped axes that didn't change while
+                    # we dropped frames; resend the full contact state.
+                    for axis in MT_AXES:
+                        if axis in self.slots.get(slot, {}):
+                            self.touch.write(e.EV_ABS, axis, self.slots[slot][axis])
+            else:
+                self.touch.write(typ, code, value)
+        self.touch.syn()
+
+    def flush(self):
+        for frame in self.buffer:
+            self.forward(frame)
+        self.buffer = []
+
+    def wheel(self, dx_mm, dy_mm):
+        # Natural direction: fingers down -> content follows -> wheel up (+).
+        for i, (rel_hi, rel, delta) in enumerate(
+                ((e.REL_HWHEEL_HI_RES, e.REL_HWHEEL, -dx_mm),
+                 (e.REL_WHEEL_HI_RES, e.REL_WHEEL, dy_mm))):
+            self.acc[i] += delta * WHEEL_PER_MM
+            units = int(self.acc[i])
+            if units:
+                self.acc[i] -= units
+                self.scroll.write(e.EV_REL, rel_hi, units)
+                self.notch[i] += units
+                notches = int(self.notch[i] / 120)
+                if notches:
+                    self.notch[i] -= notches * 120
+                    self.scroll.write(e.EV_REL, rel, notches)
+        self.scroll.syn()
+
+    def begin_scroll(self, c):
+        self.state = self.SCROLL
+        self.buffer = []  # the app never saw these touches
+        self.scroll.write(e.EV_ABS, e.ABS_X, int(c[0] * self.res_x))
+        self.scroll.write(e.EV_ABS, e.ABS_Y, int(c[1] * self.res_y))
+        self.scroll.syn()
+        self.last_c = c
+        self.acc = [0.0, 0.0]
+        self.notch = [0, 0]
+        self.vel = (0.0, 0.0)
+        self.last_move = self.t0
+        dx, dy = c[0] - self.start[0][0], c[1] - self.start[0][1]
+        if abs(dy) > abs(dx) * AXIS_LOCK_RATIO:
+            self.axis = "y"
+        elif abs(dx) > abs(dy) * AXIS_LOCK_RATIO:
+            self.axis = "x"
+        else:
+            self.axis = None
+        self.scroll_by(dx, dy, time.monotonic())
+
+    def scroll_by(self, dx, dy, now):
+        if self.axis == "y":
+            dx = 0.0
+        elif self.axis == "x":
+            dy = 0.0
+        dt = max(now - self.last_move, 1e-3)
+        a = min(dt / VELOCITY_WINDOW_S, 1.0)
+        self.vel = (self.vel[0] * (1 - a) + dx / dt * a, self.vel[1] * (1 - a) + dy / dt * a)
+        self.last_move = now
+        self.wheel(dx, dy)
+
+    # ---- state machine -------------------------------------------------
+
+    def on_event(self, ev):
+        if ev.type == e.EV_SYN:
+            if ev.code == e.SYN_REPORT:
+                frame, self.frame = self.frame, []
+                self.on_frame(frame)
+            elif ev.code == e.SYN_DROPPED:
+                self.frame = []
+            return
+        if ev.type == e.EV_ABS and ev.code == e.ABS_MT_SLOT:
+            self.cur_slot = ev.value
+        elif ev.type == e.EV_ABS and e.ABS_MT_TOUCH_MAJOR <= ev.code <= e.ABS_MT_TOOL_Y:
+            slot = self.slots.setdefault(self.cur_slot, {})
+            if ev.code == e.ABS_MT_TRACKING_ID:
+                slot["id"] = ev.value
+            else:
+                slot[ev.code] = ev.value
+        self.frame.append((ev.type, ev.code, ev.value, self.cur_slot))
+
+    def on_frame(self, frame):
+        now = time.monotonic()
+        act = self.active()
+        n = len(act)
+        if n:
+            self.inertia = None
+
+        if self.state == self.IDLE:
+            if n == 0:
+                self.forward(frame)
+                return
+            self.buffer = [frame]
+            self.t0 = now
+            self.start = (self.centroid(self.points()), 0.0, frozenset(act))
+            if n >= 2:
+                self.begin_gesture(now)
+            else:
+                self.state = self.HOLD
+            return
+
+        if self.state == self.HOLD:
+            self.buffer.append(frame)
+            if n == 0:
+                self.flush()
+                self.state = self.IDLE
+            elif n >= 2:
+                self.begin_gesture(now)
+            elif math.dist(self.centroid(self.points()), self.start[0]) > HOLD_MOVE_MM:
+                self.pass_through()
+            return
+
+        if self.state == self.GESTURE:
+            self.buffer.append(frame)
+            if n != 2 or frozenset(act) != self.start[2]:
+                self.pass_through()
+                if n == 0:
+                    self.state = self.IDLE
+                return
+            pts = self.points(self.start[2])
+            c, d = self.centroid(pts), self.spread(pts)
+            move = math.dist(c, self.start[0])
+            pinch = abs(d - self.start[1])
+            if max(move, pinch) >= DECIDE_MM:
+                if pinch > move * PINCH_RATIO:
+                    self.pass_through()
+                else:
+                    self.begin_scroll(c)
+            return
+
+        if self.state == self.PASS:
+            self.forward(frame)
+            if n == 0:
+                self.state = self.IDLE
+            return
+
+        if self.state == self.SCROLL:
+            if n == 0:
+                speed = math.hypot(*self.vel)
+                if now - self.last_move < VELOCITY_WINDOW_S and speed >= INERTIA_MIN_MM_S:
+                    self.inertia = [self.vel[0], self.vel[1], now]
+                self.state = self.IDLE
+                return
+            if frozenset(act) != self.fingers:
+                self.fingers = frozenset(act)
+                self.last_c = self.centroid(self.points())
+                return
+            c = self.centroid(self.points())
+            self.scroll_by(c[0] - self.last_c[0], c[1] - self.last_c[1], now)
+            self.last_c = c
+
+    def begin_gesture(self, now):
+        self.state = self.GESTURE
+        self.t0 = now
+        act = frozenset(self.active())
+        if len(act) != 2:
+            self.pass_through()
+            return
+        pts = self.points(act)
+        self.start = (self.centroid(pts), self.spread(pts), act)
+        self.fingers = act
+
+    def pass_through(self):
+        self.flush()
+        self.state = self.PASS
+
+    def on_timeout(self):
+        now = time.monotonic()
+        if self.state == self.HOLD and now - self.t0 >= HOLD_MS / 1000:
+            self.pass_through()
+        elif self.state == self.GESTURE and now - self.t0 >= DECIDE_TIMEOUT_MS / 1000:
+            self.pass_through()
+        elif self.inertia and self.state == self.IDLE:
+            vx, vy, last = self.inertia
+            dt = now - last
+            if dt >= INERTIA_TICK:
+                self.wheel(vx * dt, vy * dt)
+                k = INERTIA_DECAY ** (dt / INERTIA_TICK)
+                vx, vy = vx * k, vy * k
+                self.inertia = [vx, vy, now] if math.hypot(vx, vy) > INERTIA_STOP_MM_S else None
+
+    def timeout(self):
+        if self.state == self.HOLD:
+            return max(0.0, self.t0 + HOLD_MS / 1000 - time.monotonic())
+        if self.state == self.GESTURE:
+            return max(0.0, self.t0 + DECIDE_TIMEOUT_MS / 1000 - time.monotonic())
+        if self.inertia:
+            return INERTIA_TICK
+        return None
+
+    def run(self):
+        self.src.grab()
+        try:
+            while True:
+                r, _, _ = select.select([self.src.fd], [], [], self.timeout())
+                if r:
+                    for ev in self.src.read():
+                        self.on_event(ev)
+                self.on_timeout()
+        finally:
+            try:
+                self.src.ungrab()
+            except OSError:
+                pass
+            self.touch.close()
+            self.scroll.close()
+
+
+def main():
+    src = find_source()
+    print(f"touch-gestures: grabbing {src.path} ({src.name})", flush=True)
+    try:
+        Gestures(src).run()
+    except OSError as err:
+        # Source vanished (iptsd restarted, module reloaded) -> let systemd restart us.
+        sys.exit(f"touch-gestures: {err}")
+    except KeyboardInterrupt:
+        pass
+
+
+if __name__ == "__main__":
+    main()

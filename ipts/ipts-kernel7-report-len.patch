@@ -1,0 +1,40 @@
+diff -ru src-orig/src/hid.c src-new/src/hid.c
+--- src-orig/src/hid.c	2026-09-30 16:34:24.113506133 +0200
++++ src-new/src/hid.c	2026-09-30 16:54:55.402215459 +0200
+@@ -125,7 +125,7 @@
+ 	memcpy(report->gesture_char_quality.data, buffer->data, buffer->size);
+ 
+ 	return hid_input_report(ipts->hid, HID_INPUT_REPORT, (u8 *)report,
+-				IPTS_HID_REPORT_DATA_SIZE, 1);
++				IPTS_HID_REPORT_DATA_LEN, 1);
+ }
+ 
+ static int ipts_hid_handle_hid(struct ipts_context *ipts, struct ipts_data_buffer *buffer)
+diff -ru src-orig/src/resources.c src-new/src/resources.c
+--- src-orig/src/resources.c	2026-09-30 16:34:24.113892025 +0200
++++ src-new/src/resources.c	2026-09-30 16:54:55.402127978 +0200
+@@ -103,7 +103,7 @@
+ 	if (ret)
+ 		goto err;
+ 
+-	ret = ipts_resources_alloc_buffer(&resources->report, IPTS_HID_REPORT_DATA_SIZE);
++	ret = ipts_resources_alloc_buffer(&resources->report, IPTS_HID_REPORT_DATA_LEN);
+ 	if (ret)
+ 		goto err;
+ 
+diff -ru src-orig/src/spec-hid.h src-new/src/spec-hid.h
+--- src-orig/src/spec-hid.h	2026-09-30 16:34:24.114046345 +0200
++++ src-new/src/spec-hid.h	2026-09-30 16:54:55.402005792 +0200
+@@ -56,6 +56,12 @@
+  */
+ #define IPTS_HID_REPORT_DATA_SIZE 7485
+ 
++/*
++ * IPTS_HID_REPORT_DATA_LEN - Full length of the data report as declared by the descriptor:
++ * report ID (1) + scan time (2) + raw data. Kernel >= 7.0 rejects shorter reports.
++ */
++#define IPTS_HID_REPORT_DATA_LEN (1 + 2 + IPTS_HID_REPORT_DATA_SIZE)
++
+ /**
+  * ipts_singletouch_descriptor - The singletouch descriptor.
+  *
