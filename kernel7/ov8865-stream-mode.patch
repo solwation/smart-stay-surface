@@ -1,0 +1,45 @@
+--- a/ov8865.c
++++ b/ov8865.c
+@@ -2609,7 +2609,7 @@
+ {
+ 	struct ov8865_sensor *sensor = ov8865_subdev_sensor(subdev);
+ 	struct ov8865_state *state = &sensor->state;
+-	int ret;
++	int ret = 0;
+ 
+ 	if (enable) {
+ 		ret = pm_runtime_resume_and_get(sensor->dev);
+@@ -2618,11 +2618,31 @@
+ 	}
+ 
+ 	mutex_lock(&sensor->mutex);
+-	ret = ov8865_sw_standby(sensor, !enable);
++
++	/*
++	 * The sensor may already have been powered up before the current mode
++	 * was set, e.g. through the device link from the VCM, whose subdev is
++	 * opened by userspace before the sensor format is configured. Resume
++	 * then programmed the previous mode and set_fmt no longer writes
++	 * registers, so program the current mode before streaming.
++	 */
++	if (enable) {
++		ret = ov8865_mode_configure(sensor, state->mode,
++					    state->mbus_code);
++		if (!ret)
++			ret = __v4l2_ctrl_handler_setup(&sensor->ctrls.handler);
++	}
++
++	if (!ret)
++		ret = ov8865_sw_standby(sensor, !enable);
++
+ 	mutex_unlock(&sensor->mutex);
+ 
+-	if (ret)
++	if (ret) {
++		if (enable)
++			pm_runtime_put(sensor->dev);
+ 		return ret;
++	}
+ 
+ 	state->streaming = !!enable;
+ 
