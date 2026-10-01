@@ -34,11 +34,9 @@ RECOG_MODEL = os.path.join(MODEL_DIR, "face_recognition_sface_2021dec.onnx")
 DATA_DIR = "/etc/face-unlock"
 LOCK_FILE = "/run/face-unlock.lock"
 
-MEDIA_DEV = "/dev/media0"
 SENSOR = '"ov7251 3-0060"'
 CSI2 = '"ipu3-csi2 2"'
-SENSOR_SUBDEV = "/dev/v4l-subdev8"
-VIDEO_DEV = "/dev/video2"
+CAPTURE = "ipu3-cio2 2"    # video node behind CSI2
 WIDTH, HEIGHT = 640, 480
 # IPU3 packed 10-bit: 25 pixels in 32 bytes, lines padded to whole blocks
 BYTES_PER_LINE = (WIDTH + 24) // 25 * 32
@@ -75,14 +73,36 @@ def run(*cmd):
         raise CameraError(f"{cmd[0]} failed: {r.stderr.strip() or r.returncode}")
 
 
+def v4l2_node(name):
+    """/dev path of the V4L2 node called `name` (numbering changes between boots)."""
+    sysdir = "/sys/class/video4linux"
+    for node in os.listdir(sysdir):
+        with open(os.path.join(sysdir, node, "name")) as f:
+            if f.read().strip() == name:
+                return "/dev/" + node
+    raise CameraError(f"V4L2 node {name!r} not found")
+
+
+def media_node(video_dev):
+    """/dev/mediaN that `video_dev` belongs to."""
+    devdir = f"/sys/class/video4linux/{os.path.basename(video_dev)}/device"
+    for entry in os.listdir(devdir):
+        if entry.startswith("media"):
+            return "/dev/" + entry
+    raise CameraError(f"no media device for {video_dev}")
+
+
 def frames(timeout):
     """Yield raw IR frames for up to `timeout` seconds."""
+    video_dev = v4l2_node(CAPTURE)
+    media_dev = media_node(video_dev)
+    sensor_subdev = v4l2_node(SENSOR.strip('"'))
     # The sensor -> CSI-2 link is off by default and not persistent.
-    run("media-ctl", "-d", MEDIA_DEV, "-l", f"{SENSOR}:0 -> {CSI2}:0[1]")
-    run("media-ctl", "-d", MEDIA_DEV, "-V", f"{CSI2}:0 [fmt:Y10_1X10/{WIDTH}x{HEIGHT}]")
-    run("v4l2-ctl", "-d", SENSOR_SUBDEV, "-c", f"exposure={EXPOSURE},gain={GAIN}")
+    run("media-ctl", "-d", media_dev, "-l", f"{SENSOR}:0 -> {CSI2}:0[1]")
+    run("media-ctl", "-d", media_dev, "-V", f"{CSI2}:0 [fmt:Y10_1X10/{WIDTH}x{HEIGHT}]")
+    run("v4l2-ctl", "-d", sensor_subdev, "-c", f"exposure={EXPOSURE},gain={GAIN}")
     proc = subprocess.Popen(
-        ["v4l2-ctl", "-d", VIDEO_DEV,
+        ["v4l2-ctl", "-d", video_dev,
          f"--set-fmt-video=width={WIDTH},height={HEIGHT},pixelformat=ip3y",
          "--stream-mmap", "--stream-to=-"],
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
