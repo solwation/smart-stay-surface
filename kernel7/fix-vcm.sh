@@ -9,7 +9,7 @@
 # the front camera.
 #
 # Symptom:  cam -l            -> "Available cameras:" (empty)
-#           media-ctl -d /dev/media1 -p  -> sensors show "0 link"
+#           media-ctl -d <CIO2 media dev> -p  -> sensors show "0 link"
 #
 # This script downloads dw9719.c for the running kernel's version, restores
 # the ID table (as in upstream master) and installs it via DKMS. DKMS signs

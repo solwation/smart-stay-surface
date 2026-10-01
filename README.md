@@ -83,7 +83,7 @@ sudo reboot
 
 On Ubuntu 26.04 (kernel 7.0, libcamera 0.7) the setup differs from older releases:
 
-- **No cameras at all** (`cam -l` lists nothing, `media-ctl -d /dev/media1 -p` shows the sensors with `0 link`). Kernel 7.0 dropped the I2C ID table from the `dw9719` driver for the rear camera's focus motor (VCM). The VCM never binds, and because the IPU3 CIO2 driver waits for *every* subdevice before linking any sensor, the front camera disappears too. `kernel7/fix-vcm.sh` (run automatically by `install.sh`) rebuilds `dw9719` with the ID table restored, as in upstream master, and installs it via DKMS. It is a no-op on kernels that don't need it.
+- **No cameras at all** (`cam -l` lists nothing, `media-ctl -p` on the CIO2 media device shows the sensors with `0 link`). Kernel 7.0 dropped the I2C ID table from the `dw9719` driver for the rear camera's focus motor (VCM). The VCM never binds, and because the IPU3 CIO2 driver waits for *every* subdevice before linking any sensor, the front camera disappears too. `kernel7/fix-vcm.sh` (run automatically by `install.sh`) rebuilds `dw9719` with the ID table restored, as in upstream master, and installs it via DKMS. It is a no-op on kernels that don't need it.
   - Under Secure Boot, DKMS signs the module with the Ubuntu MOK key (`/var/lib/shim-signed/mok/MOK.der`), which must already be enrolled. Signing modules with an enrolled MOK does not change PCR 7, so TPM2 disk auto-unlock bound to PCR 7 keeps working.
   - DKMS rebuilds the module automatically on kernel updates. Once Ubuntu ships a kernel with the fix, the script detects it and skips.
 - **The tuning fix is no longer needed.** libcamera 0.7's `uncalibrated.yaml` already enables Agc/Awb/BlackLevelCorrection/ToneMapping, and `fix-camera.sh` detects this and skips.
@@ -94,7 +94,8 @@ Useful diagnostics on this setup:
 
 ```bash
 cam -l                                  # cameras libcamera can see
-media-ctl -d /dev/media1 -p | grep entity   # sensors should have "1 link"
+# the CIO2 media device number varies between boots
+media-ctl -d $(dirname $(grep -l CIO2 /sys/bus/media/devices/*/model) | sed s,.*/,/dev/,) -p | grep entity   # sensors should have "1 link"
 modinfo -F alias dw9719 | grep i2c      # empty = unfixed kernel 7.0 driver
 cam --camera=2 --capture=30 --stream=role=viewfinder,width=1280,height=720 --file=/tmp/f-#.bin
 ```
@@ -205,7 +206,9 @@ stock Ubuntu 26.04:
    and libcamera's IPU3 pipeline only drives Bayer sensors, so `cam -l` lists only the front
    and rear cameras. It doesn't need an ISP though: `face-unlock` enables the (off by default,
    non-persistent) `ov7251 → ipu3-csi2 2` media link and reads 640x480 IPU3-packed 10-bit
-   greyscale straight from CIO2 (`/dev/video2`, `ip3y`) with `v4l2-ctl`.
+   greyscale straight from CIO2 (video node `ipu3-cio2 2`, `ip3y`) with `v4l2-ctl`. The
+   `/dev/media*`, `/dev/video*` and `/dev/v4l-subdev*` numbers change between boots, so
+   `face-unlock` looks the nodes up by name in sysfs.
 2. **The IR illuminator stays dark.** It is not a GPIO of the INT3472 (the IR sensor's
    `SKC2` only has clock-enable and reset) but hangs off the sensor's strobe output, which the
    upstream driver never enables — frames are near-black indoors. `kernel7/fix-ov7251.sh`
