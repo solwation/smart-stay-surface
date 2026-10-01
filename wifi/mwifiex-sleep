@@ -1,0 +1,15 @@
+#!/bin/bash
+# systemd-sleep hook: unload mwifiex_pcie before suspend and reload it after resume.
+# The Marvell 88W8897 on the Surface Pro often fails to come back from s2idle
+# ("Unable to change power state from D3hot to D0" / "Firmware didn't wake up" /
+# "cmd_wait_q terminated: -110") and then needs a reboot. A fresh probe after resume
+# downloads the firmware again and avoids that. Installed to /usr/lib/systemd/system-sleep/.
+case "$1" in
+    pre)
+        modprobe -r mwifiex_pcie 2>/dev/null
+        ;;
+    post)
+        /usr/local/sbin/wifi-reset --resume
+        ;;
+esac
+exit 0

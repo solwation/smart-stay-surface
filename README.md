@@ -196,6 +196,23 @@ systemctl status 'iptsd@*' touch-gestures           # daemons
 grep -A1 -E 'IPTSD|Touch Gestures' /proc/bus/input/devices
 ```
 
+## Wifi after suspend (mwifiex)
+
+The Marvell 88W8897 (`mwifiex_pcie`, PCI `0000:01:00.0`) sometimes does not wake up from
+s2idle: `Unable to change power state from D3hot to D0`, `Firmware didn't wake up`, then an
+endless stream of `cmd_wait_q terminated: -110` — wifi is dead until reboot. Kernel 7.0 lacks
+linux-surface's mwifiex patches, so `wifi/` works around it:
+
+- `mwifiex-sleep` (→ `/usr/lib/systemd/system-sleep/`) unloads `mwifiex_pcie` before suspend
+  and reloads it after resume (fresh firmware download). Reconnecting takes a few seconds.
+- `wifi-reset` (→ `/usr/local/sbin/`) reloads the driver, falling back to PCI remove + rescan.
+  Run `pkexec wifi-reset` if wifi dies anyway — no reboot needed. Log: `journalctl -t wifi-reset`.
+
+```bash
+pkexec ~/Documents/smart-stay-surface/wifi/install.sh               # install / update
+pkexec ~/Documents/smart-stay-surface/wifi/install.sh --uninstall
+```
+
 ## Face unlock (IR camera)
 
 Not part of smart-stay either: `face-unlock/` unlocks the GNOME lock screen with the

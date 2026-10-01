@@ -1,0 +1,34 @@
+#!/bin/bash
+# Bring the Marvell wifi (mwifiex_pcie, PCI 0000:01:00.0) back without rebooting.
+#   pkexec wifi-reset          reload the driver; if that fails, remove + rescan the PCI device
+#   wifi-reset --resume        used by the system-sleep hook after resume
+DEV=0000:01:00.0
+log() { logger -t wifi-reset "$*"; echo "$*"; }
+
+wait_netdev() {
+    for _ in $(seq 1 "$1"); do
+        ls /sys/bus/pci/devices/$DEV/net/ 2>/dev/null | grep -q . && return 0
+        sleep 0.5
+    done
+    return 1
+}
+
+if [[ "${1:-}" == "--resume" ]]; then
+    modprobe mwifiex_pcie
+    wait_netdev 16 && { log "wifi back after resume"; exit 0; }
+    log "wifi did not come back after resume, resetting PCI device"
+fi
+
+modprobe -r mwifiex_pcie 2>/dev/null
+sleep 1
+modprobe mwifiex_pcie
+wait_netdev 16 && { log "wifi back after driver reload"; exit 0; }
+
+log "driver reload failed, removing and rescanning $DEV"
+modprobe -r mwifiex_pcie 2>/dev/null
+[[ -e /sys/bus/pci/devices/$DEV ]] && echo 1 > /sys/bus/pci/devices/$DEV/remove
+sleep 1
+echo 1 > /sys/bus/pci/rescan
+wait_netdev 20 && { log "wifi back after PCI rescan"; exit 0; }
+log "wifi still missing — reboot needed"
+exit 1
