@@ -107,6 +107,11 @@ Note that `cam` requires `=` for its optional-argument flags (`--capture=30`, no
 IPU3 cameras can't be used through plain V4L2, so browsers only see them through the camera portal → PipeWire → libcamera. `kernel7/chrome-camera.sh` (run as your user) does the system side; Chrome needs two manual steps:
 
 1. **PipeWire libcamera plugin** (`libspa-0.2-libcamera`). `wpctl status` should list `ov5693`/`ov8865` as `[libcamera]` devices. Reloading camera modules (`fix-vcm.sh`, `fix-ov8865.sh`) drops them until `systemctl --user restart wireplumber`; both scripts now do that.
+   If no camera apps (Chrome, GNOME Snapshot) see any camera after a boot, check
+   `journalctl --user -b -u wireplumber | grep media` for `Failed to open media device … Permission denied`:
+   WirePlumber started before the logind ACL on `/dev/media*` was in place. Fix: add the user to `video`
+   (`pkexec usermod -aG video $USER`, takes effect at next login); immediate workaround:
+   `systemctl --user restart wireplumber`.
 2. **Chrome flag** `chrome://flags/#enable-webrtc-pipewire-camera` → Enabled, then `chrome://restart`.
 3. **Portal permission.** The portal's permission dialog fails for Chrome web apps (`xdg-desktop-portal: … Only the focused app is allowed to show a system access dialog`) because the PWA window's app ID differs from the requesting process (`com.google.Chrome`). The script grants it directly in the permission store; revoke in Settings → Privacy & Security → Camera.
 4. **Per-site permission.** A site that asked for permissions while no camera was available (Teams asked for the microphone only) won't ask again. Allow the camera in `chrome://settings/content/siteDetails?site=https://teams.cloud.microsoft` and reload.
