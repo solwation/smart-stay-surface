@@ -25,6 +25,16 @@ Single-file Python script (`smart-stay`) — no build system, no package manager
 - `smart-stay.service` — systemd user service, installed to `~/.config/systemd/user/`
 - `face-unlock/` — lock-screen face unlock with the IR camera (unrelated to smart-stay itself, see README "Face unlock")
 - `ipts/`, `touch/` — Surface Pro 5 touchscreen on kernel 7.0 (unrelated to smart-stay itself, see README "Touchscreen")
+- `power/` — independent system service for closed-lid power saving, plus UPower
+  suspend at 10% battery. See README "Closed lid power saving and low battery suspend".
+  Installed 2026-10-15; sources initially lived in `~/.local/share/surface-power/`.
+  `lid-power.py` is installed as `/usr/local/lib/surface-lid-power.py` and runs as root
+  for Intel CPU controls; GNOME settings are accessed as user `olw`. Only lid handling
+  is inhibited, so UPower can still suspend. Restore saved settings on open/stop and
+  recover `/run/surface-lid-power/state.json` on restart. Tests use temporary CPU
+  controls and mocked desktop commands, never real suspend. The older
+  `/usr/local/sbin/power-profile-ac` hook can change the profile on charger events;
+  it does not clear the CPU cap or turbo restriction. No hibernate support is assumed.
 - `install.sh` — copies both files to the right places. Accepts `--ac-mode`/`--battery-mode` to configure detection per power state, or `--motion` for legacy motion-only mode.
 
 ## Hardware specifics

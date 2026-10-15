@@ -1,0 +1,16 @@
+[Unit]
+Description=Surface closed-lid power saving
+After=systemd-logind.service power-profiles-daemon.service
+Wants=power-profiles-daemon.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/systemd-inhibit --what=handle-lid-switch --who=Surface-lid-power --why=Keep-work-running-with-CPU-limited --mode=block /usr/bin/python3 /usr/local/lib/surface-lid-power.py
+Restart=on-failure
+RestartSec=5
+RuntimeDirectory=surface-lid-power
+RuntimeDirectoryPreserve=restart
+TimeoutStopSec=90
+
+[Install]
+WantedBy=multi-user.target
