@@ -1,5 +1,13 @@
 # smart-stay-surface
 
+## Project scope
+
+This is a public Surface troubleshooting toolkit. Keep utilities independently
+installable and optional; expose policy choices as configuration or arguments.
+Never hard-code a personal username, host path, backup timestamp, or enrollment.
+Personal system inventory belongs outside the repo. Kernel fixes are hardware
+and kernel specific; document prerequisites rather than promising universal support.
+
 ## Overview
 A "Smart Stay" daemon for Linux Surface devices. Keeps the screen awake while on AC power and the front camera can see a face.
 
@@ -25,16 +33,15 @@ Single-file Python script (`smart-stay`) — no build system, no package manager
 - `smart-stay.service` — systemd user service, installed to `~/.config/systemd/user/`
 - `face-unlock/` — lock-screen face unlock with the IR camera (unrelated to smart-stay itself, see README "Face unlock")
 - `ipts/`, `touch/` — Surface Pro 5 touchscreen on kernel 7.0 (unrelated to smart-stay itself, see README "Touchscreen")
-- `power/` — independent system service for closed-lid power saving, plus UPower
-  suspend at 10% battery. See README "Closed lid power saving and low battery suspend".
-  Installed 2026-10-15; sources initially lived in `~/.local/share/surface-power/`.
-  `lid-power.py` is installed as `/usr/local/lib/surface-lid-power.py` and runs as root
-  for Intel CPU controls; GNOME settings are accessed as user `olw`. Only lid handling
-  is inhibited, so UPower can still suspend. Restore saved settings on open/stop and
-  recover `/run/surface-lid-power/state.json` on restart. Tests use temporary CPU
-  controls and mocked desktop commands, never real suspend. The older
-  `/usr/local/sbin/power-profile-ac` hook can change the profile on charger events;
-  it does not clear the CPU cap or turbo restriction. No hibernate support is assumed.
+- `power/` — optional closed-lid power saving and/or UPower battery suspend.
+  Explicit `--lid` / `--battery` flags select components; no implicit installation.
+  Account, CPU cap, profile, turbo policy, polling, and battery thresholds are
+  configurable. See `power/README.md`. Root code uses the configured non-root
+  account for GNOME operations. Intel controls are optional. Restore saved values
+  on open/stop and recover runtime state on restart. Tests must never invoke real
+  suspend or mutate host power settings.
+- `RESTORE.md` — public module map and fresh-install checklist. Keep host-specific
+  settings in local notes/configuration outside this repo.
 - `install.sh` — copies both files to the right places. Accepts `--ac-mode`/`--battery-mode` to configure detection per power state, or `--motion` for legacy motion-only mode.
 
 ## Hardware specifics
@@ -65,6 +72,6 @@ Single-file Python script (`smart-stay`) — no build system, no package manager
 
 ## Conventions
 - No virtualenv — all deps are system apt packages
-- Constants at top of script, no config file
+- Smart Stay constants live at the top of its script; optional power policy uses a local INI file
 - Logs to `~/.cache/smart-stay.log`, PID file at `~/.cache/smart-stay.pid`
 - Debug mode: `smart-stay --debug-capture` saves 7 frames (every 5s) to `/tmp/smart-stay-debug/` with face detection overlays

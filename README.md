@@ -2,6 +2,12 @@
 
 Keep your screen awake while on AC power and your face is visible to the front camera. Automatically allows locking when it can't see you. A Linux equivalent of Samsung's "Smart Stay" feature, built for Microsoft Surface devices with IPU3 cameras.
 
+The repository also collects optional Surface fixes and utilities for cameras,
+touch, face unlock, Wi-Fi resume, and power management. Choose the pieces relevant
+to your hardware; see [Surface setup and restoration](RESTORE.md) for a module map
+and a fresh-install checklist. Personal accounts, preferences, and biometric data
+belong outside the public repository.
+
 ## How it works
 
 Every 30 seconds (configurable), the script:
@@ -273,108 +279,14 @@ Deliberate limits:
 
 ## Closed lid power saving and low battery suspend
 
-Installed on the Ubuntu Surface on 2026-10-15. This is independent of camera-based
-Smart Stay and keeps background work running while the magnetic keyboard cover is
-closed, then pauses the computer when the battery reaches 10% while discharging.
+An optional module in [`power/`](power/README.md) can keep processes running with a
+closed cover using a configurable power profile and available Intel CPU limits.
+A separate option requests suspend at a configurable battery percentage. Neither
+is installed by the main Smart Stay installer.
 
-| Event | Behavior |
-|---|---|
-| Cover closes | Select `power-saver`, disable Intel turbo, cap CPU performance at 35%, activate GNOME screensaver, temporarily disable idle suspend |
-| Cover opens | Restore the power profile, CPU limits, turbo setting, and idle suspend policies saved at closure |
-| Battery reaches 20% / 15% | UPower low / critical battery warning levels |
-| Battery reaches 10% while discharging | UPower requests suspend, whether the cover is open or closed |
-
-The cap controls `intel_pstate/max_perf_pct`, not process priority or CPU usage. An
-existing cap below 35% is preserved, subject to the driver's minimum performance
-setting. Reduced performance lowers CPU power use but does not guarantee a particular
-temperature. Suspend pauses processes and keeps RAM powered; exhausting the battery
-can lose the in-memory session. Hibernate is not configured.
-
-The root system service polls `/proc/acpi/button/lid/*/state` every two seconds and
-uses `systemd-inhibit --what=handle-lid-switch` to replace the normal lid suspend
-action. It does not inhibit sleep, so UPower and manual suspend remain available.
-GNOME settings are changed as user `olw`; other accounts are not configured.
-
-The existing `/usr/local/sbin/power-profile-ac` charger hook can change the profile
-while the cover is closed. CPU limits and the turbo restriction remain in effect.
-Opening the cover restores the profile saved at closure, even if the charger changed.
-
-### Installed files
-
-| File | Purpose |
-|---|---|
-| `/usr/local/lib/surface-lid-power.py` | Lid watcher and setting restoration |
-| `/etc/systemd/system/surface-lid-power.service` | Root service enabled at boot |
-| `/etc/UPower/UPower.conf.d/90-surface-battery.conf` | 20/15/10% battery policy and suspend action |
-| `/run/surface-lid-power/state.json` | Previous settings saved while the cover is closed |
-| `/var/backups/surface-power/20261015-080205/UPower.conf` | Original main UPower configuration |
-
-Maintain sources in `power/`. Initial copies remain in
-`~/.local/share/surface-power/`; installed behavior should follow the repo sources.
-Install or update from the repo root:
-
-```bash
-pkexec /usr/bin/python3 power/install.py
-```
-
-The installer backs up existing configuration, installs the service and a UPower
-override, restarts UPower, and verifies that `GetCriticalAction` returns `Suspend`.
-It does not edit the main UPower configuration or `logind.conf`.
-
-### Status and troubleshooting
-
-```bash
-systemctl status surface-lid-power.service --no-pager
-journalctl -u surface-lid-power.service -n 30 --no-pager
-cat /proc/acpi/button/lid/*/state
-powerprofilesctl get
-cat /sys/devices/system/cpu/intel_pstate/max_perf_pct
-cat /sys/devices/system/cpu/intel_pstate/no_turbo
-busctl call org.freedesktop.UPower /org/freedesktop/UPower org.freedesktop.UPower GetCriticalAction
-```
-
-With the cover closed, expect `power-saver` (unless the charger hook changed it),
-normally `35` for the CPU cap, and `1` for `no_turbo`. Opening the cover should log
-restoration of previous settings. If the service crashes, it attempts to restore
-saved settings on restart. A normal service stop also restores them.
-
-Service activation, the lid inhibitor, and UPower's selected suspend action were
-verified at installation. Three tests cover close/open restoration, recovery from
-partial failure, and preserving an existing lower CPU cap:
-
-```bash
-cd power
-/usr/bin/python3 -m unittest -v test_lid_power.py
-```
-
-A physical cover cycle and discharge to 10% have not yet been tested with this setup.
-For Wi-Fi problems after resume, see the existing `wifi/` workaround and system
-notes in `~/CLAUDE.md`.
-
-### Disable or reenable
-
-Disable closed-cover handling and restore saved settings:
-
-```bash
-sudo systemctl disable --now surface-lid-power.service
-```
-
-This releases the lid inhibitor, returning lid handling to Ubuntu. The 10% battery
-rule is separate. Disable that override as well to restore the underlying UPower
-policy (previously action at 2%, resolving to power off on this machine):
-
-```bash
-sudo mv /etc/UPower/UPower.conf.d/90-surface-battery.conf /etc/UPower/UPower.conf.d/90-surface-battery.conf.disabled
-sudo systemctl restart upower.service
-```
-
-To reenable both after these steps:
-
-```bash
-sudo mv /etc/UPower/UPower.conf.d/90-surface-battery.conf.disabled /etc/UPower/UPower.conf.d/90-surface-battery.conf
-sudo systemctl restart upower.service
-sudo systemctl enable --now surface-lid-power.service
-```
+Choose `--lid`, `--battery`, or both; configure the desktop account, CPU cap, turbo,
+polling interval, and battery thresholds. See the [module guide](power/README.md)
+for requirements, previewing changes, installation, tests, and removal.
 
 ## License
 
