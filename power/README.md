@@ -113,6 +113,13 @@ busctl call org.freedesktop.UPower /org/freedesktop/UPower org.freedesktop.UPowe
 ```
 
 Record baseline values, close the cover, then open it and confirm they return.
+Reboot once and confirm the service is `active` without starting it manually.
+
+If it is `inactive` after boot and the journal shows `Found ordering cycle ...
+Job surface-lid-power.service/start deleted`, the installed unit is an older
+copy with `WantedBy=multi-user.target`. Ubuntu's `power-profiles-daemon` orders
+itself after `multi-user.target`, so systemd drops this service at boot and the
+lid suspends as usual. Reinstall with `--lid` to use `WantedBy=graphical.target`.
 Check suspend/resume on your hardware before relying on low-battery handling.
 For Marvell Wi-Fi resume problems, see [`../wifi/`](../wifi/) and the main README.
 

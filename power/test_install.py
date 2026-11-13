@@ -22,6 +22,14 @@ class InstallerTests(unittest.TestCase):
             self.parse([])
         self.assertEqual(error.exception.code, 2)
 
+    def test_service_avoids_boot_ordering_cycle(self):
+        # power-profiles-daemon orders itself After=multi-user.target; a unit that is
+        # After= it must not be pulled in by multi-user.target or systemd drops it at boot.
+        unit = Path(__file__).with_name('surface-lid-power.service').read_text()
+        self.assertIn('After=systemd-logind.service power-profiles-daemon.service', unit)
+        self.assertIn('WantedBy=graphical.target', unit)
+        self.assertNotIn('WantedBy=multi-user.target', unit)
+
     def test_components_are_independent(self):
         battery = installer.build_plan(self.parse(['--battery', '--suspend-at', '8']))
         self.assertEqual(set(battery), {installer.BATTERY_CONFIG})
@@ -57,6 +65,21 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual(config.read_text(), 'original')
             self.assertEqual(config.stat().st_mode & 0o777, 0o640)
             self.assertEqual(calls.count(('systemctl', 'restart', 'upower.service')), 2)
+
+    def test_lid_install_reenables_to_replace_stale_links(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / 'lid.conf'
+            calls = []
+            def command(*args):
+                calls.append(args)
+                return ''
+            args = self.parse(['--lid', '--user', 'desktop-user'])
+            with patch.object(installer, 'BACKUPS', Path(tmp) / 'backups'), \
+                 patch.object(installer, 'run', side_effect=command), \
+                 patch.object(installer.subprocess, 'run', return_value=SimpleNamespace(returncode=0)):
+                installer.apply_plan(args, {config: b'new config'})
+            self.assertIn(('systemctl', 'reenable', installer.SERVICE), calls)
+            self.assertNotIn(('systemctl', 'enable', installer.SERVICE), calls)
 
     def test_battery_uninstall_leaves_unrelated_files_untouched(self):
         with tempfile.TemporaryDirectory() as tmp:

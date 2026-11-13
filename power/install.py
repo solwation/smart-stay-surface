@@ -143,7 +143,8 @@ def apply_plan(args, plan):
                 if action != 's "Suspend"':
                     raise RuntimeError('UPower did not select Suspend: ' + action)
         if args.lid and not args.uninstall:
-            run('systemctl', 'enable', SERVICE)
+            # reenable drops links from an older [Install] section (e.g. multi-user.target)
+            run('systemctl', 'reenable', SERVICE)
             run('systemctl', 'start', SERVICE)
             run('systemctl', 'is-active', '--quiet', SERVICE)
     except Exception:

@@ -13,4 +13,4 @@ RuntimeDirectoryPreserve=restart
 TimeoutStopSec=90
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=graphical.target
